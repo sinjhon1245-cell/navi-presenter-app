@@ -389,8 +389,9 @@ test("휴대폰 계정 자리: 준비 화면 머리 줄의 동그라미 → 아�
   await head.locator(".acct-btn").click();
   const pop = ph.page.locator(".acct-pop");
   await expect(pop).toContainText(who);
-  const pb = await pop.boundingBox();
-  expect(Math.round(pb.y + pb.height)).toBe(844);
+  // 아래에서 올라오는 메뉴: 아래 끝이 화면 아래 끝(844)이에요. 로그인 직후 계정 정보가 와서 화면이 다시 그려지는 순간에는
+  // 메뉴 위치를 읽지 못할 수 있어서(CI에서 한 번 null), 다시 그려진 메뉴로 다시 재요(같은 기준, 388줄과 같은 방식)
+  await expect.poll(async () => { const pb = await pop.boundingBox(); return pb ? Math.round(pb.y + pb.height) : null; }).toBe(844);
   await ph.page.keyboard.press("Escape");
   await expect(pop).toHaveCount(0);
   // 수업 시작 → 휴대폰을 리모컨(QR 주소)으로: 계정 단추 · 머리 줄이 없어요
