@@ -129,7 +129,9 @@ test("PDF를 올리면 장 모양 그대로 장면이 되고, ‘PPTX에서 노�
   // 노트와 발화는 접지 않고 늘 보여요(교사 PC에서는 슬라이드 옆, 세로 태블릿에서는 슬라이드 아래). 발화를 적어도 경고가 생기거나 사라지는 것이 없어요
   const say = page.locator('textarea[data-k="say"]'), notes = page.locator('textarea[data-k="notes"]');
   if (page.viewportSize().width >= 900) { await expect(say).toBeInViewport(); await expect(notes).toBeInViewport(); }
-  else { await say.scrollIntoViewIfNeeded(); await expect(say).toBeVisible(); await expect(notes).toBeVisible(); }
+  // 올린 뒤 저장 · 쪽 그림이 끝나며 화면이 다시 그려지는 순간이면 칸이 바뀌어 스크롤이 실패해요(main에서도 25번 중 1번).
+  // 다시 그려진 칸으로 다시 스크롤해요(확인 기준은 그대로)
+  else { await expect(async () => { await say.scrollIntoViewIfNeeded(); }).toPass(); await expect(say).toBeVisible(); await expect(notes).toBeVisible(); }
   await say.fill("오늘은 식물이 자라는 순서를 알아볼 거예요.");
   await say.blur();
   await expect(page.locator(".rd.warn")).toHaveCount(0);
