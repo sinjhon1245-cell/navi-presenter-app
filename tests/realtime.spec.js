@@ -109,7 +109,7 @@ test("신호등: 휴대폰과 교사 PC가 같은 순간 눌러도 둘 다 남�
   await finishLesson(ph.page);
   await expect(pc.stage.locator(".stage-msg")).toContainText("수업 끝");
   await expect(pc.page.locator(".memo-sheet")).toBeVisible();
-  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC 브라우저에 기록을 저장했어요");
+  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC가 이 수업의 기록을 만들었어요");
   // 기록은 교사 PC 브라우저에 1건, 휴대폰 브라우저에는 없어요. 동시에 누른 빨강 · 노랑과 초록이 모두 남아요
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
   const rec = (await localRecords(pc.page))[0];
@@ -383,7 +383,7 @@ test("끝난 뒤 조작: 양쪽에서 동시에 끝내도 기록은 1건, 끝난
   test.info().annotations.push({ type: "끝내기 확인을 실제로 누른 쪽(교사 PC, 휴대폰)", description: pressed.join(", ") });
   expect(pressed).toEqual([true, true]);
   await expect(pc.stage.locator(".stage-msg")).toContainText("수업 끝");
-  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC 브라우저에 기록을 저장했어요");
+  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC가 이 수업의 기록을 만들었어요");
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
   const first = (await localRecords(pc.page))[0];
   // 끝난 수업: 교사 PC의 다음 · 신호 키, 휴대폰의 키는 아무것도 바꾸지 않아요(휴대폰에는 넘기기 · 신호 단추도 없어요)
@@ -691,9 +691,77 @@ test("한 화면 모드: 교사 PC 막대에 ‘수업 끝내기’가 있고, �
   await finishLesson(ph.page);
   await expect(pc.page.locator(".stage-msg")).toContainText("수업 끝");
   await expect(endBtn).toHaveCount(0);
-  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC 브라우저에 기록을 저장했어요");
+  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC가 이 수업의 기록을 만들었어요");
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
   expect(await localRecords(ph.page)).toEqual([]);
   expect(popups, "한 화면 모드인데 수업 화면 창이 따로 열렸어요").toBe(0);
   expect(errors).toEqual([]);
+});
+
+// 휴대폰의 수업 끝 화면(2026-11-22, docs/STABILITY.md 4절): 휴대폰은 기록을 읽지도 쓰지도 않아요. 그래서 기록이 저장됐는지를 휴대폰이
+// 단정하지 않고(‘저장했어요’라고 하지 않아요), 누를 수 없는 ‘기록을 저장하는 중…’ 단추도 남기지 않아요. 저장 결과는 교사 PC가 말해요
+const phoneSheet = (ph) => ph.page.locator(".memo-sheet");
+async function phoneNeutral(ph, where) {
+  const sheet = phoneSheet(ph);
+  await expect(sheet, where).toContainText("교사 PC가 이 수업의 기록을 만들었어요", { timeout: 20000 });
+  await expect(sheet, where).toContainText("저장됐는지는 교사 PC 화면에서 확인해 주세요");
+  await expect(sheet.locator(".rec-go"), where + ": 휴대폰에 기록 단추").toHaveCount(0);
+  await expect(sheet, where).not.toContainText("기록을 저장하는 중");
+  await expect(sheet, where + ": 휴대폰이 저장을 단정해요").not.toContainText("저장했어요");
+}
+
+test("수업 끝 · 휴대폰: 기록 저장을 단정하지 않고 ‘기록을 저장하는 중…’ 단추가 남지 않아요. 새로고침 · 끊김 · 교사 PC 로그아웃 뒤에도 같고, 휴대폰 로그아웃이면 끝 화면이 사라져요", async ({ browser }) => {
+  const errors = [], who = email("teacher");
+  const pc = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, pc.url, who);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0]);
+  await nextBtn(ph.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1]);
+  await finishLesson(pc.page);
+  // 교사 PC는 그대로: 서버가 확인한 뒤 ‘계정에 저장했어요’, 주 단추 ‘수업 기록 보기’, 이 브라우저에 1건
+  await expect(pc.page.locator(".memo-sheet")).toContainText("계정에 저장했어요", { timeout: 20000 });
+  await expect(pc.page.locator(".memo-sheet .rec-go")).toHaveText(/수업 기록 보기/);
+  await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
+  await phoneNeutral(ph, "끝난 직후");
+  await ph.page.reload();
+  await phoneNeutral(ph, "휴대폰 새로고침 뒤");
+  await ph.ctx.setOffline(true);
+  await ph.page.waitForTimeout(1500);
+  await phoneNeutral(ph, "휴대폰이 끊긴 동안");
+  await ph.ctx.setOffline(false);
+  await ph.page.waitForTimeout(1500);
+  await phoneNeutral(ph, "휴대폰이 다시 이어진 뒤");
+  // 교사 PC가 기록을 확인하고 로그아웃(공용 PC 안내 줄): 계정의 수업 끝 상태는 그대로라 휴대폰도 같은 말
+  await Promise.all([pc.page.waitForEvent("load"), pc.page.locator('.memo-sheet [data-act="logout"]').click()]);
+  await ph.page.waitForTimeout(1500);
+  await phoneNeutral(ph, "교사 PC 로그아웃 뒤");
+  // 휴대폰 로그아웃: 계정과 끊기니 수업 끝 화면도 사라져요(휴대폰 브라우저에는 기록이 없어요)
+  await Promise.all([ph.page.waitForEvent("load"), ph.page.evaluate(() => window.naviAuth.signOut()).catch(() => {})]);
+  await expect(phoneSheet(ph)).toHaveCount(0);
+  expect(await localRecords(ph.page)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("수업 끝 · 교사 PC가 끊긴 채 끝내기: PC는 ‘아직 계정에 저장하지 못했어요’ → 이어지면 ‘계정에 저장했어요’, 휴대폰은 그동안 끝났다고 하지 않고 이어진 뒤에도 저장을 단정하지 않아요", async ({ browser }) => {
+  const errors = [], who = email("teacher");
+  const pc = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, pc.url, who);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0]);
+  await readDoc(pc.page, "sessions/s" + pc.url.match(/#remote-(\d{4})/)[1], { started: true });
+  await pc.ctx.setOffline(true);
+  await finishLesson(pc.page);
+  // 교사 PC의 저장 상태: 이 브라우저에는 저장, 계정은 아직
+  await expect(pc.page.locator(".memo-sheet .warn-note")).toContainText("인터넷이 끊겨 아직 계정에 저장하지 못했어요", { timeout: 15000 });
+  await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
+  // 휴대폰은 PC의 끝내기를 아직 받지 못했어요: 끝 화면도, 저장했다는 말도 없어요
+  await ph.page.waitForTimeout(1500);
+  await expect(phoneSheet(ph)).toHaveCount(0);
+  await expect(ph.page.locator("body")).not.toContainText("저장했어요");
+  // 다시 이어지면: PC는 서버가 받은 뒤 ‘계정에 저장했어요’, 휴대폰은 끝 화면 + 확인은 PC에서
+  await pc.ctx.setOffline(false);
+  await expect(pc.page.locator(".memo-sheet")).toContainText("계정에 저장했어요", { timeout: 30000 });
+  await phoneNeutral(ph, "교사 PC가 다시 이어진 뒤");
+  expect((await localRecords(pc.page)).length, "기록은 한 건").toBe(1);
+  expect(await localRecords(ph.page)).toEqual([]);
+  expect(errors.filter((e) => !/ERR_INTERNET_DISCONNECTED|net::/.test(e))).toEqual([]);
 });
