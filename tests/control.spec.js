@@ -581,7 +581,7 @@ test("PC 끊김 → 휴대폰에서 끝내기 → 복구 → 정상 종료: 끊�
   // 이어진 뒤 휴대폰에서 끝내면 PC가 끝내고 기록을 하나 남겨요
   await endFrom(ph);
   await expect(pc.stage.locator(".stage-msg")).toContainText("수업 끝");
-  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC 브라우저에 기록을 저장했어요");
+  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC가 이 수업의 기록을 만들었어요");
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
   await ph.page.waitForTimeout(800);
   expect((await localRecords(pc.page)).length).toBe(1);
@@ -612,7 +612,7 @@ test("PC를 닫은 뒤 휴대폰에서 끝내기: 바로 안내하고 수업은 
   await expect(offer).toContainText(LABELS.length + " / " + LABELS.length);
   await offer.getByRole("button", { name: /기록 저장하고 끝내기/ }).click();
   await expect.poll(async () => (await localRecords(again)).length).toBe(1);
-  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC 브라우저에 기록을 저장했어요", { timeout: 15000 });
+  await expect(ph.page.locator(".memo-sheet")).toContainText("교사 PC가 이 수업의 기록을 만들었어요", { timeout: 15000 });
   await again.reload();
   await pcLinked(again);
   await again.waitForTimeout(1000);
