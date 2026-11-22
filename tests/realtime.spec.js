@@ -213,8 +213,10 @@ test("끊김과 다시 잇기: 휴대폰이 끊기면 넘기기를 막고, 다�
   await expect(offer).toContainText("끝나지 않은 수업이 있어요");
   await nextBtn(ph.page).click();
   await expect(offer).toContainText("5 / " + LABELS.length);
-  const [again] = await Promise.all([pc.page.waitForEvent("popup"), offer.getByRole("button", { name: "이어서 하기" }).click()]);
-  watch(again, errors);
+  // 수업 화면 창은 새로고침해도 그대로예요(2026-11-19, docs/STAGE-KEEP.md): 이어서 하기 전에는 마지막 장면(교사 PC가 그리기 전), 뒤에는 지금 장면
+  await expect(stageLabel(pc.stage)).toHaveText(LABELS[3]);
+  await offer.getByRole("button", { name: "이어서 하기" }).click();
+  const again = pc.stage;
   await expect(curLabel(pc.page)).toHaveText(LABELS[4]);
   await expect(stageLabel(again)).toHaveText(LABELS[4]);
   await nextBtn(ph.page).click();

@@ -428,8 +428,10 @@ test("끝나지 않은 수업(실제 수업을 시작해 넘긴 뒤 PC 새로고
   await expect(pc.page.locator("#app .main .btn.warm:visible")).toHaveText(["이어서 하기"]);
   await expect(rows(pc.page).filter({ hasText: "끝나지 않을 수업" })).toContainText("끝나지 않은 수업 · 2 / 4");
   await expect(pc.page.locator(".mylib")).not.toContainText("계속 준비하기");
-  const [stage2] = await Promise.all([pc.page.waitForEvent("popup"), offer.getByRole("button", { name: "이어서 하기" }).click()]);
-  watch(stage2, errors);
+  // 수업 화면 창은 새로고침해도 그대로라(2026-11-19, docs/STAGE-KEEP.md) 이어서 하기는 그 창에 지금 장면을 다시 그려요
+  await offer.getByRole("button", { name: "이어서 하기" }).click();
   await expect(pc.page.locator(".prog-n").first()).toContainText("2");
+  await expect(stage.locator(".stage-bar .chip").first()).toHaveText("새 장면");
+  await expect(stage.locator(".stage-wait")).toHaveCount(0);
   expect(real(errors)).toEqual([]);
 });

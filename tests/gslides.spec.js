@@ -45,6 +45,8 @@ function fakeGoogle(o) {
     if (!/upload_id=/.test(url) && (req.headers().authorization || "") !== "Bearer test-drive-token") return json({ error: { status: "UNAUTHENTICATED" } }, 401);
     const live = () => g.files.filter((f) => !f.trashed);
     if (m === "GET" && /\/drive\/v3\/files\?/.test(url)) {
+      // Google 창에서 ‘Drive 파일’ 허용에 체크하지 않은 열쇠(2026-11-19)
+      if (g.listFail) return json({ error: { errors: [{ reason: "insufficientPermissions" }], status: "PERMISSION_DENIED" } }, 403);
       const q = new URL(url).searchParams.get("q") || "";
       if (q.includes("value='folder'")) return json({ files: g.folder ? [{ id: "dir1" }] : [] });
       const fid = (q.match(/key='fid' and value='([^']+)'/) || [])[1];
@@ -245,12 +247,12 @@ test("같은 계정 휴대폰: 교사 PC와 같은 PDF(지문 확인)로 지금 
   const [stage] = await Promise.all([page.waitForEvent("popup"), page.getByRole("button", { name: "수업 시작" }).click()]);
   watch(stage, errors);
   await expect(curLabel(ph.page)).toHaveText(await curLabel(page).innerText(), { timeout: 20000 });
-  // 이 휴대폰에는 파일이 없어요: 누르기 전에는 Google로 요청하지 않아요
+  // 이 휴대폰에는 파일이 없어요: 누르기 전에는 Google로 요청하지 않고, 찾기 전에는 볼 수 있다고 말하지 않아요(2026-11-19)
   const n0 = g.log.length;
-  await expect(ph.page.locator(".gs-ph")).toContainText("슬라이드는 교사 PC에 있어요", { timeout: 20000 });
+  await expect(ph.page.locator(".gs-ph")).toContainText("슬라이드 그림은 교사 PC에 있어요", { timeout: 20000 });
   await ph.page.waitForTimeout(500);
   expect(g.log.length).toBe(n0);
-  await ph.page.locator(".gs-ph").getByRole("button", { name: "슬라이드 보기" }).click();
+  await ph.page.locator(".gs-ph").getByRole("button", { name: "Drive에서 슬라이드 찾기" }).click();
   await drawn(ph.page.locator(".rm-tv.big .slide.img img"));
   await drawn(ph.page.locator(".rm-tv .nx-pic"));
   await expect(ph.page.locator(".gs-ph")).toHaveCount(0);
@@ -274,6 +276,154 @@ test("같은 계정 휴대폰: 교사 PC와 같은 PDF(지문 확인)로 지금 
   await expect(ph.page.locator(".thumb-nav .sug")).toBeVisible();
   expect(await ph.page.locator(".rm-tv.big .slide.img img").getAttribute("src")).toMatch(/^blob:/);
   expect(await deckJson(pc.uid)).not.toContain("googleapis");
+  expect(errors).toEqual([]);
+});
+
+// ---------- 휴대폰 슬라이드: 확인한 것만 말해요(2026-11-19, PR #26, docs/PHONE-SLIDES.md) ----------
+// 휴대폰에는 수업 파일이 없어요(교사 PC 브라우저에만). Drive 사본은 Google로 바꾸며 ‘PDF 사본 남겨 두기’를 고른 수업에만 있고,
+// 휴대폰은 Drive에 물어보기 전에는 있는지 몰라요(수업 문서에는 파일 id · 종류 · 이름만). 그래서 찾기 전에는 ‘슬라이드 보기’처럼 말하지 않고,
+// 없다고 확인하면 짧게 한 줄, 같은 수업에서 Google 창을 다시 열지 않아요. 어느 경우에도 넘기기 · 노트 · 신호는 그대로예요
+// 휴대폰의 Google 허용 창: 연 횟수를 세고(창 없이 쓰는 열쇠는 세지 않아요), fail이면 그 오류로 닫혀요(취소 · 막힘 흉내)
+const googleWindow = (page, fail) => page.evaluate((fail) => {
+  const a = window.naviAuth;
+  if (!a.__real) a.__real = a.driveToken.bind(a);
+  window.__pop = window.__pop || 0; window.__popFail = fail || "";
+  a.driveToken = (o) => {
+    if (o && o.silent) return a.__real(o);
+    window.__pop++;
+    if (window.__popFail) return Promise.reject(Object.assign(new Error("google window"), { code: window.__popFail }));
+    return a.__real(o);
+  };
+}, fail || "");
+const windowsOpened = (page) => page.evaluate(() => window.__pop || 0);
+// 휴대폰으로 다음 장면 → PC가 따라오고, 그 장면 노트가 휴대폰에, 노랑 신호가 PC에
+async function phoneStillWorks(pc, ph, noteLine) {
+  const before = await curLabel(pc.page).innerText();
+  await nextBtn(ph.page).click();
+  await expect(curLabel(pc.page)).not.toHaveText(before, { timeout: 15000 });
+  await expect(curLabel(ph.page)).toHaveText(await curLabel(pc.page).innerText());
+  if (noteLine) await expect(ph.page.locator(".remote .prompter")).toContainText(noteLine);
+  await ph.page.locator(".thumb-nav .sig.s-yellow").click();
+  await expect(pc.page.locator(".sig.s-yellow.on").first()).toBeVisible({ timeout: 15000 });
+}
+async function startWithPhone(browser, errors, pc, who, g) {
+  const url = await qrUrl(pc.page);
+  const ph = await phoneJoins(browser, errors, url, who);
+  await g.attach(ph.ctx);
+  const [stage] = await Promise.all([pc.page.waitForEvent("popup"), pc.page.getByRole("button", { name: "수업 시작" }).click()]);
+  watch(stage, errors);
+  await expect(curLabel(ph.page)).toHaveText(await curLabel(pc.page).innerText(), { timeout: 20000 });
+  return ph;
+}
+const firstLines = (list) => list.map((t) => t.trim().split("\n")[0]);
+
+test("PDF+PPTX 수업 · 같은 계정 휴대폰: 찾기 전에는 ‘슬라이드 보기’라고 하지 않고 ‘Drive에서 슬라이드 찾기’, 없다고 확인하면 짧은 한 줄 · 같은 수업에서 다시 찾거나 Google 창을 열지 않아요(새로고침해도). 넘기기 · 노트 · 신호는 그대로", async ({ browser }) => {
+  const errors = [], who = email("teacher"), g = fakeGoogle();
+  const pc = await teacher(browser, errors, who, g), page = pc.page;
+  await page.getByRole("tab", { name: "내 수업" }).click();
+  await page.locator("#pdf-in").setInputFiles(["lesson.pdf", "lesson.pptx"].map(fixture));
+  await expect(page.getByText("3장을 올렸어요")).toBeVisible({ timeout: 30000 });
+  const noteText = firstLines(await notes(page, 3));
+  await page.locator(".srow").first().click();
+  const ph = await startWithPhone(browser, errors, pc, who, g);
+  await googleWindow(ph.page);
+  const row = ph.page.locator(".gs-ph"), n0 = g.log.length;
+  // 확인 전: 그림이 어디에 있는지와 할 수 있는 일(찾기)만. 볼 수 있는 것처럼 말하지 않아요
+  await expect(row).toContainText("슬라이드 그림은 교사 PC에 있어요", { timeout: 20000 });
+  await expect(row.getByRole("button", { name: "Drive에서 슬라이드 찾기" })).toBeVisible();
+  await expect(row.getByRole("button", { name: "슬라이드 보기" })).toHaveCount(0);
+  await ph.page.waitForTimeout(500);
+  expect(g.log.length, "누르기 전에는 Google로 요청하지 않아요").toBe(n0);
+  expect(await windowsOpened(ph.page)).toBe(0);
+  await ph.page.screenshot({ path: test.info().outputPath("phone-before-find.png") });
+  await row.getByRole("button", { name: "Drive에서 슬라이드 찾기" }).click();
+  // 없다고 확인: 짧은 한 줄, 누를 것 없음
+  await expect(row).toHaveText("Drive에 이 수업의 슬라이드 사본이 없어요.", { timeout: 15000 });
+  await expect(row.getByRole("button")).toHaveCount(0);
+  expect(await windowsOpened(ph.page)).toBe(1);
+  await ph.page.screenshot({ path: test.info().outputPath("phone-none.png") });
+  // 다음 장면: 그 한 줄 그대로 · 다시 찾지 않아요
+  const n1 = g.log.length;
+  await phoneStillWorks(pc, ph, noteText[1]);
+  await expect(row).toHaveText("Drive에 이 수업의 슬라이드 사본이 없어요.");
+  expect(g.log.length).toBe(n1);
+  expect(await windowsOpened(ph.page)).toBe(1);
+  // 휴대폰 새로고침: 같은 탭 · 같은 수업은 다시 묻지도 찾지도 않아요
+  await ph.page.reload();
+  await expect(curLabel(ph.page)).toHaveText(await curLabel(page).innerText(), { timeout: 20000 });
+  await expect(row).toHaveText("Drive에 이 수업의 슬라이드 사본이 없어요.", { timeout: 20000 });
+  await expect(row.getByRole("button")).toHaveCount(0);
+  await phoneStillWorks(pc, ph, noteText[2]);
+  expect(g.log.length).toBe(n1);
+  expect(g.log.slice(n0).filter((l) => !/^GET /.test(l)), "휴대폰은 Drive에 아무것도 올리거나 고치지 않아요").toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("Google 변환 수업(사본 남김) · 휴대폰: Google 창을 닫거나 Drive 허용이 없으면 그 까닭과 ‘다시 찾기’(저절로 다시 열지 않아요), 다시 허용하면 사본으로 슬라이드. 그동안 넘기기 · 노트 · 신호는 그대로", async ({ browser }) => {
+  const errors = [], who = email("teacher"), g = fakeGoogle();
+  const pc = await teacher(browser, errors, who, g), page = pc.page;
+  await addPptx(page, "lesson.pptx", 3);
+  const noteText = firstLines(await notes(page, 3));
+  await consent(page);
+  await expect(page.getByText("Google Slides로 바꾼 원래 모양 3장을 넣었어요")).toBeVisible({ timeout: 30000 });
+  await page.locator(".srow").first().click();
+  const ph = await startWithPhone(browser, errors, pc, who, g);
+  const row = ph.page.locator(".gs-ph"), n0 = g.log.length;
+  // 로그인 취소: Google 창을 닫았어요 → 바꾸기 이야기가 아니라 찾기 이야기, 저절로 다시 열지 않아요
+  await googleWindow(ph.page, "auth/popup-closed-by-user");
+  await row.getByRole("button", { name: "Drive에서 슬라이드 찾기" }).click();
+  await expect(row).toContainText("Google 창을 닫아서 찾지 않았어요", { timeout: 15000 });
+  await expect(row).not.toContainText("바꾸지");
+  await expect(row.getByRole("button", { name: "다시 찾기" })).toBeVisible();
+  await ph.page.waitForTimeout(800);
+  expect(await windowsOpened(ph.page), "저절로 다시 열지 않아요").toBe(1);
+  expect(g.log.length, "창을 닫으면 Drive에 묻지 않아요").toBe(n0);
+  await phoneStillWorks(pc, ph, noteText[1]);
+  await expect(row.getByRole("button", { name: "다시 찾기" })).toBeVisible();
+  expect(await windowsOpened(ph.page)).toBe(1);
+  // 권한 오류: ‘Drive 파일’ 허용 없이 받은 열쇠 → 까닭 · 다시 찾기(다음에는 Google 창을 다시 열어요)
+  g.listFail = true;
+  await googleWindow(ph.page, "");
+  await row.getByRole("button", { name: "다시 찾기" }).click();
+  await expect(row).toContainText("Drive 허용을 받지 못했어요", { timeout: 15000 });
+  await expect(row.getByRole("button", { name: "다시 찾기" })).toBeVisible();
+  expect(await windowsOpened(ph.page)).toBe(2);
+  expect(await ph.page.evaluate(() => window.naviAuth.driveReady()), "허용 없는 열쇠는 버려서 다음에는 Google 창에서 다시 체크해요").toBe(false);
+  await ph.page.screenshot({ path: test.info().outputPath("phone-no-permission.png") });
+  // 다시 허용: Drive의 같은 PDF 사본으로 지금 장면 그림
+  g.listFail = false;
+  await row.getByRole("button", { name: "다시 찾기" }).click();
+  await drawn(ph.page.locator(".rm-tv.big .slide.img img"));
+  await expect(row).toHaveCount(0);
+  expect(await windowsOpened(ph.page)).toBe(3);
+  await phoneStillWorks(pc, ph, noteText[2]);
+  await drawn(ph.page.locator(".rm-tv.big .slide.img img"));
+  expect(g.log.slice(n0).filter((l) => !/^GET /.test(l)), "휴대폰은 Drive에 아무것도 올리거나 고치지 않아요").toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("Google 변환 수업(사본 남기지 않음) · 이번 시간에 이미 허용한 휴대폰: 누르지 않아도 창 없이 찾아 보고, 없으면 짧은 한 줄만", async ({ browser }) => {
+  const errors = [], who = email("teacher"), g = fakeGoogle();
+  const pc = await teacher(browser, errors, who, g), page = pc.page;
+  await addPptx(page, "lesson.pptx", 3);
+  await consent(page, { drop: true });
+  await expect(page.getByText("Google Slides로 바꾼 원래 모양 3장을 넣었어요")).toBeVisible({ timeout: 30000 });
+  expect(g.files.filter((f) => !f.trashed), "Drive에 남은 것이 없어요").toEqual([]);
+  await page.locator(".srow").first().click();
+  const url = await qrUrl(page);
+  const ph = await phoneJoins(browser, errors, url, who);
+  await g.attach(ph.ctx);
+  // 이 휴대폰은 이번 시간에 이미 허용했어요(열쇠가 있어요)
+  await ph.page.evaluate(() => window.naviAuth.driveToken());
+  await googleWindow(ph.page);
+  const [stage] = await Promise.all([page.waitForEvent("popup"), page.getByRole("button", { name: "수업 시작" }).click()]);
+  watch(stage, errors);
+  await expect(curLabel(ph.page)).toHaveText(await curLabel(page).innerText(), { timeout: 20000 });
+  const row = ph.page.locator(".gs-ph");
+  await expect(row).toHaveText("Drive에 이 수업의 슬라이드 사본이 없어요.", { timeout: 20000 });
+  expect(await windowsOpened(ph.page), "창을 열지 않아요").toBe(0);
+  await phoneStillWorks(pc, ph, "");
+  await expect(row).toHaveText("Drive에 이 수업의 슬라이드 사본이 없어요.");
   expect(errors).toEqual([]);
 });
 

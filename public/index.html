@@ -300,6 +300,11 @@ html.awake .stage-bar { opacity: 1; }
 .stage-ask .confirm { justify-content: center; }
 .stage-bar .confirm .btn.warm { background: var(--ac-fill); border-color: var(--ac-fill); color: var(--ac-on); }
 html:not(.awake) .stage { cursor: none; }
+/* the student window while the teacher screen reloads (2026-11-19, docs/STAGE-KEEP.md): the last picture stays, with this small note
+   at the top (the stage bar sits at the bottom). It shows after a moment, so a reload that is picked up at once does not flicker */
+.stage-wait { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 30; padding: 6px 14px; border-radius: 999px; background: rgba(18, 22, 30, .82); color: #DDE3EC; font-size: 15px; pointer-events: none; animation: stage-wait-in .3s ease 1.2s both; }
+@keyframes stage-wait-in { from { opacity: 0; } to { opacity: 1; } }
+.run-offer .run-tv { color: var(--tx-2); font-size: var(--fs-sm); }
 .blankout { position: fixed; inset: 0; z-index: 20; cursor: none; }
 .blankout.black { background: #000000; }
 .blankout.white { background: #FFFFFF; }
@@ -1568,6 +1573,11 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // screen-only state: the sidebar (folded on a PC, a drawer on a phone), library view, the teacher screen's materials drawer
   let sideOff = false, menuOpen = false, libView = "list", drawerOpen = false;
   let recGoMsg = "", recPicked = false, recFilter = "this", recOpen = null, copied = null, stageWin = null, stageMsg = "", screenObjs = null;
+  // the student window kept across a reload of this page (2026-11-19, PR #26, docs/STAGE-KEEP.md): held = taken back but not drawn yet
+  // (it keeps its last picture until the class is picked up); bye = this page is logging out, so the window closes instead of waiting
+  // looked = the kept window had its chance to come back (so a closed one can be said to be closed)
+  let stageHeld = false, stageBye = false, stageLooked = false;
+  const stageLetGone = new WeakSet();
   let draft = { title: "", t: "보충", link: "", where: "scene" }, draftFile = null;
   const detState = {}, aiOut = {}, said = {}, pageBlobs = {};
 
@@ -1620,7 +1630,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
   let refH = null, hub = null, hubKey = "", hubDone = "", hubOff = false, mStart = null, mStartAsk = false, pairListen = () => {};
   const START_WAIT = 4000, START_LATE = 10000;
   function hubState() {
-    return { v: 1, on: true, pc: tabId, run: curRun, stage: !C.presenter || !!stageDoc(), title: String(D.title || "").slice(0, 200), scenes: pages().length, offer: !!runOffer, live: !!(S.started && !S.ended) };
+    return { v: 1, on: true, pc: tabId, run: curRun, stage: !C.presenter || stageLive(), title: String(D.title || "").slice(0, 200), scenes: pages().length, offer: !!runOffer, live: !!(S.started && !S.ended) };
   }
   function pubHub() {
     if (!refH || hubOff || !isHub() || rehearsing || !curRun || !holds()) return;
@@ -1868,8 +1878,8 @@ button.pchip { cursor: pointer; font-family: inherit; }
     ctl = hub && to !== tabId && !hub.on ? "free" : "other";
     closePair(); connOpen = false; pinShown = false; takeAsk = false; startAsk = false;
     if (had) { handed = true; runOffer = null; runDrop = false; runStore.del(runKey()); if (role) setRole(null); }
-    // the same browser has one student window: it now belongs to the window that holds the class
-    if (liveTabs.has(to)) stageWin = null;
+    // the same browser has one student window: it now belongs to the window that holds the class (and this page does not take it back)
+    if (liveTabs.has(to)) { if (stageWin) stageLetGone.add(stageWin); stageWin = null; stageHeld = false; }
     followS(); render();
   }
   // takes the class. Every path goes through the transaction: what this screen last heard is never enough on its own
@@ -2403,6 +2413,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
       '<div class="row"><button class="btn small" data-act="run-drop-yes">버리기</button><button class="btn small ghost" data-act="run-drop-no">취소</button></div>');
     return box("<b>끝나지 않은 수업이 있어요</b><span>‘" + esc(x.title) + "’ · " + (i + 1) + " / " + list.length + " ‘" + esc(p.label || "") + "’ · " + dt(xs.t0) + " 시작 · 신호등 " + nLit + "개 · 질문 메모 " + nQ + "개</span>" +
       (x.deck && x.deck.kind === "pdf" ? "<span>올린 파일의 쪽 그림은 저장하지 않아서, 이어서 하면 장면 이름만 보여요.</span>" : "") +
+      // what happens to the TV, said before the press (2026-11-19, docs/STAGE-KEEP.md)
+      (!C.presenter ? "" : stageHeld && stageDoc() ? '<span class="run-tv">수업 화면(TV)은 열린 그대로예요. ‘이어서 하기’를 누르면 그 창에 지금 장면이 나와요.</span>'
+        : !stageLooked || stageLive() ? "" : '<span class="run-tv">수업 화면(TV) 창은 닫혀 있어요. ‘이어서 하기’를 누르면 새로 열려요' + (screenObjs && screenObjs[Number(C.monitor) - 1] ? "(" + Number(C.monitor) + "번 모니터)." : ". TV로 옮긴 뒤 ‘전체 화면’을 눌러 주세요.") + "</span>") +
       '<div class="row"><button class="btn small warm" data-act="run-resume">이어서 하기</button><button class="btn small" data-act="run-end">지금까지 기록 저장하고 끝내기</button><button class="btn small ghost" data-act="run-drop">기록 없이 버리기</button></div>' +
       (guardOn() ? "" : '<span class="muted small-text">새 수업을 시작하면 이 수업은 기록 없이 사라져요.</span>'));
   }
@@ -3514,7 +3527,26 @@ button.pchip { cursor: pointer; font-family: inherit; }
   }
   // phone (same Google account): the lesson's slides from the teacher's Drive — the very PDF the PC drew from (checked by its fingerprint),
   // or Google's pictures for a big deck. Only the scene now and the next one are drawn; kept in this page's memory, never saved
-  let gsPh = null; // { fid, state: "asking" | "ok" | "none" | "err", kind: "pdf" | "pics", pdf, ids, file, tok, msg }
+  // What the phone knows (2026-11-19, PR #26, docs/PHONE-SLIDES.md): the lesson document holds only the file's id · kind · name, so whether
+  // a Drive copy exists (only for a lesson made through Google with ‘PDF 사본 남겨 두기’) is known only after asking Drive. Until then the
+  // screen offers to look (‘Drive에서 슬라이드 찾기’), never to show. A ‘no copy’ answer is kept for this tab (per lesson file) so the same
+  // lesson does not ask again, not even after a reload. The phone only reads Drive: it never uploads or changes anything there.
+  let gsPh = null; // { fid, state: "asking" | "ok" | "none" | "err" | "tap", kind: "pdf" | "pics", pdf, ids, file, tok, msg, again }
+  const GS_NONE = "navi-gs-none";
+  const gsNoneSeen = (fid) => { try { return (JSON.parse(sessionStorage.getItem(mineKey(GS_NONE)) || "[]")).includes(fid); } catch (e) { return false; } };
+  const gsNoneKeep = (fid) => { try { const l = JSON.parse(sessionStorage.getItem(mineKey(GS_NONE)) || "[]").filter((x) => x !== fid); l.push(fid); sessionStorage.setItem(mineKey(GS_NONE), JSON.stringify(l.slice(-20))); } catch (e) {} };
+  // the phone's words: looking for slides, not converting (gsErr is about sending a PPTX to Google). again: whether ‘다시 찾기’ can help
+  function gsPhErr(e) {
+    const c = (e && e.code) || "", r = (e && e.reason) || "", st = e && e.status;
+    if (c === "auth/popup-closed-by-user" || c === "auth/cancelled-popup-request") return { msg: "Google 창을 닫아서 찾지 않았어요.", again: true };
+    if (c === "auth/popup-blocked") return { msg: "Google 창이 막혔어요. 이 사이트의 팝업을 허용해 주세요.", again: true };
+    if (c === "auth/user-mismatch") return { msg: "교사와 다른 구글 계정을 골랐어요. 같은 계정으로 해 주세요.", again: true };
+    if (r === "mismatch") return { msg: "Drive의 사본이 지금 수업과 달라요. 슬라이드는 교사 PC에서 봐요.", again: false };
+    // a key without the Drive tick (or an old one) is dropped, so ‘다시 찾기’ opens Google's window again instead of failing the same way
+    if (st === 401) { window.naviAuth.dropDriveToken(); return { msg: "Google 허용 시간이 지났어요.", again: true }; }
+    if (st === 403 || r === "insufficientPermissions") { window.naviAuth.dropDriveToken(); return { msg: "Drive 허용을 받지 못했어요. Google 창에서 ‘Drive 파일’에 체크해 주세요.", again: true }; }
+    return { msg: "Drive에서 찾지 못했어요" + (navigator.onLine === false ? "(인터넷 연결이 끊겼어요)." : ". 잠시 뒤 다시 찾아 주세요."), again: true };
+  }
   async function gsPhone(silent) {
     const fid = D.file && D.file.fid;
     if (!fid) return;
@@ -3522,7 +3554,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
     try {
       const tok = await window.naviAuth.driveToken(silent ? { silent: true } : null); await loadScript("gdrive.js");
       const G = window.naviDrive, f = await G.byFid(tok, fid);
-      if (!f) { gsPh = { fid, state: "none" }; render(); return; }
+      if (!f) { gsNoneKeep(fid); gsPh = { fid, state: "none" }; render(); return; }
       if (f.mimeType === "application/pdf") {
         const b = await G.download(tok, f.id);
         if ("f-" + (await sha256(b)).slice(0, 32) !== fid) throw Object.assign(new Error("mismatch"), { reason: "mismatch" });
@@ -3531,7 +3563,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
         gsPh = { fid, state: "ok", kind: "pdf", pdf: await lib.getDocument({ data: new Uint8Array(await b.arrayBuffer()) }).promise };
       } else gsPh = { fid, state: "ok", kind: "pics", ids: await G.slides(tok, f.id), file: f.id, tok };
       gsPhPics();
-    } catch (e) { gsPh = silent ? { fid, state: "tap" } : { fid, state: "err", msg: gsErr(e) }; }
+    } catch (e) { gsPh = silent && e && e.code === "drive/need-tap" ? { fid, state: "tap" } : Object.assign({ fid, state: "err" }, gsPhErr(e)); }
     render();
   }
   const gsPhBusy = {};
@@ -3550,7 +3582,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
         if (g.kind === "pdf") b = (await drawPage(g.pdf, p.pg)).blob;
         else { const t = await window.naviDrive.thumb(g.tok, g.file, g.ids[p.pg - 1], "MEDIUM"); b = await (await fetch(t.url, { referrerPolicy: "no-referrer" })).blob(); }
         fileUrls[key] = URL.createObjectURL(b);
-      } catch (e) { if (e && e.status === 401) { window.naviAuth.dropDriveToken(); gsPh = { fid: g.fid, state: "tap" }; } }
+      } catch (e) { if (e && e.status === 401) gsPh = Object.assign({ fid: g.fid, state: "err" }, gsPhErr(e)); }
       delete gsPhBusy[key];
       render();
     }
@@ -3561,13 +3593,16 @@ button.pchip { cursor: pointer; font-family: inherit; }
   function gsPhRow() {
     if (gsPhOn()) { gsPhPics(); return ""; }
     if (!gsPhNeed()) return "";
-    const g = gsPh && gsPh.fid === D.file.fid ? gsPh : null;
-    // a press already given this hour on this phone: the pictures come by themselves
+    let g = gsPh && gsPh.fid === D.file.fid ? gsPh : null;
+    // this tab already found no copy for this lesson file: say so, without asking Drive (or Google's window) again
+    if (!g && gsNoneSeen(D.file.fid)) g = gsPh = { fid: D.file.fid, state: "none" };
+    // a press already given this hour on this phone: look by itself, without a window
     if (!g && window.naviAuth.driveReady()) { setTimeout(() => gsPhone(true), 0); return ""; }
-    return '<div class="gs-ph">' + (g && g.state === "asking" ? "<span>Google Drive에서 슬라이드를 받는 중이에요…</span>"
-      : g && g.state === "none" ? "<span>이 수업의 슬라이드 사본이 Drive에 없어요. 교사 PC에서 ‘PDF 사본 남겨 두기’로 바꾸면 여기에서도 보여요.</span>"
-      : (g && g.state === "err" ? "<span>" + esc(g.msg) + "</span>" : "<span>슬라이드는 교사 PC에 있어요. Drive의 사본으로 이 휴대폰에서도 볼 수 있어요(한 시간에 한 번 허용).</span>") +
-        '<button class="btn small" data-act="gs-phone">슬라이드 보기</button>') + "</div>";
+    const find = (label) => '<button class="btn small" data-act="gs-phone">' + label + "</button>";
+    return '<div class="gs-ph">' + (g && g.state === "asking" ? "<span>Drive에서 이 수업의 슬라이드를 찾는 중이에요…</span>"
+      : g && g.state === "none" ? "<span>Drive에 이 수업의 슬라이드 사본이 없어요.</span>"
+      : g && g.state === "err" ? "<span>" + esc(g.msg) + "</span>" + (g.again ? find("다시 찾기") : "")
+      : "<span>슬라이드 그림은 교사 PC에 있어요. Google로 바꾸며 사본을 남긴 수업이면 Drive에서 찾을 수 있어요.</span>" + find("Drive에서 슬라이드 찾기")) + "</div>";
   }
 
   // ---------- 수업 준비 위쪽: one status area (2026-11-16, PR #24) ----------
@@ -5337,7 +5372,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
   function tvState() {
     const sp = screenPlan();
     if (sp.clash) return { tone: "warn", text: "화면 확인", sub: "수업 화면이 교사 화면으로 가요" };
-    if (stageDoc()) return { tone: "ok", text: "수업 화면 열림", sub: "TV로 옮겨 전체 화면" };
+    // kept from before the reload, not drawn by this page yet: not '열림' until the class is picked up
+    if (stageHeld && stageDoc()) return { tone: "", text: "수업 화면 다시 연결 전", sub: runOffer ? "‘이어서 하기’를 누르면 이어져요" : "연결하는 중", state: "다시 연결 전" };
+    if (stageLive()) return { tone: "ok", text: "수업 화면 열림", sub: "TV로 옮겨 전체 화면" };
     if (stageFail) return { tone: "warn", text: "팝업이 막혔어요", sub: "주소창 오른쪽에서 허용" };
     if (screens) return screens.length > 1 ? { tone: "ok", text: "모니터 " + screens.length + "개 확인", sub: "수업 화면은 " + sp.monName } : { tone: "warn", text: "모니터 1개뿐", sub: "TV를 확장으로 연결" };
     // text is the prep row (a button that opens it); state is the side status line (not a button), so it says how things are
@@ -5495,8 +5532,75 @@ button.pchip { cursor: pointer; font-family: inherit; }
   }
   // the student screen: a second window drawn directly from this page (no hash routing needed)
   function stageDoc() { try { return stageWin && !stageWin.closed ? stageWin.document : null; } catch (e) { return null; } }
+  // open and drawn by this page (a window taken back after a reload is not, until it is drawn again)
+  const stageLive = () => !!stageDoc() && !stageHeld;
+  // ---------- the student window across a reload of this page (2026-11-19, PR #26, docs/STAGE-KEEP.md) ----------
+  // The window is a blank one this page draws into, so it used to be closed with the page: after a reload the teacher moved a new
+  // 1280×720 window to the TV and pressed full screen again. Now the window carries a few lines of its own (its own script, so they
+  // outlive this page): every half second they hand the window to the page now in the same tab (window.opener), and close the window
+  // once that tab is gone or has left this site for 3 seconds in a row. The page that comes back takes it only for the same account and
+  // keeps it as it is (held: last picture + a 'reconnecting' note on the TV, '다시 연결 전' on the teacher screen) until the class is
+  // picked up, ended or dropped, or there turns out to be none. Event handlers the old page set die with it (Chrome · Edge); the new page sets its own
+  const STAGE_WATCH = "(function(){var w=window,n=0;if(w.__naviWatch)return;w.__naviWatch=setInterval(function(){var o=w.opener,ok=false;" +
+    "try{ok=!!o&&!o.closed&&!!o.document}catch(e){}" +
+    "if(!ok){if(++n>=6){clearInterval(w.__naviWatch);w.close()}return}n=0;" +
+    "try{if(typeof o.__naviAdopt==='function')o.__naviAdopt(w)}catch(e){}},500)})();";
+  const STAGE_WAIT = "교사 화면과 다시 연결하는 중이에요";
+  function hookStage(w, d) {
+    d.addEventListener("click", onClick);
+    d.addEventListener("keydown", onKey);
+    ["mousemove", "touchstart", "keydown"].forEach((e) => d.addEventListener(e, () => wakeDoc(d), { passive: true }));
+    w.addEventListener("beforeunload", () => { stageWin = null; stageHeld = false; setTimeout(render, 0); });
+    w.addEventListener("message", onYt);
+    d.documentElement.setAttribute("data-navi-owner", ownerTag || "-");
+  }
+  function stageWaitOff() { const d = stageDoc(), n = d && d.querySelector(".stage-wait"); if (n) n.remove(); }
+  // the student window a reloaded page finds in its tab: taken back for the same account, closed for anyone else (signed out, another teacher)
+  function adoptStage(w) {
+    if (w === stageWin) return true;
+    if (stageLetGone.has(w) || stageBye) return false;
+    let d;
+    try { d = w.document; } catch (e) { return false; }
+    if (!d || !d.getElementById("stage-root")) return false;
+    if (d.documentElement.getAttribute("data-navi-owner") !== (ownerTag || "-") || stageDoc()) { try { w.close(); } catch (e) {} return true; }
+    // this version's look (an update may have come with the reload)
+    const st = d.head && d.head.querySelector("style");
+    if (st) st.textContent = document.querySelector("style").textContent;
+    hookStage(w, d);
+    stageWin = w; stageHeld = true; stageFail = false; stageMsg = "";
+    if (!d.querySelector(".stage-wait")) { const n = d.createElement("div"); n.className = "stage-wait"; n.setAttribute("role", "status"); n.textContent = STAGE_WAIT; d.body.appendChild(n); }
+    render();
+    return true;
+  }
+  // a held window is drawn again once there is nothing to pick up: the class was picked up, ended or dropped, or there was none
+  // (this browser's copy and, signed in, the account's class have both been looked at)
+  function stageLetGo() {
+    if (!stageHeld) return;
+    if (!stageDoc()) { stageHeld = false; return; }
+    const looked = !db || !keepsHere() || !isHub() || !offerOpen;
+    if (!looked || runOffer) return;
+    stageHeld = false;
+    stageWaitOff();
+  }
+  // closing this page: a reload keeps the window (above); logging out closes it at once
+  window.addEventListener("pagehide", (ev) => {
+    if (ev.persisted) return;
+    window.__naviAdopt = null;
+    const d = stageDoc();
+    if (!d) return;
+    if (stageBye) { try { stageWin.close(); } catch (e) {} return; }
+    try { if (!d.querySelector(".stage-wait")) { const n = d.createElement("div"); n.className = "stage-wait"; n.setAttribute("role", "status"); n.textContent = STAGE_WAIT; d.body.appendChild(n); } } catch (e) {}
+  });
+  window.addEventListener("pageshow", (ev) => { if (ev.persisted && window.__naviAdoptReady) window.__naviAdopt = adoptStage; });
+  function stageQuit() { stageBye = true; try { if (stageWin) stageWin.close(); } catch (e) {} stageWin = null; stageHeld = false; }
   function openStageWin() {
-    if (stageDoc()) { try { stageWin.focus(); } catch (e) {} stageMsg = "수업 화면은 이미 열려 있어요. 그 창을 앞으로 가져왔어요."; render(); return; }
+    if (stageDoc()) {
+      // a window kept from before the reload: drawn now, unless a class is still waiting for ‘이어서 하기’
+      if (stageHeld && !runOffer) { stageHeld = false; stageWaitOff(); }
+      try { stageWin.focus(); } catch (e) {}
+      stageMsg = stageHeld ? "수업 화면은 열린 그대로예요. ‘이어서 하기’를 누르면 그 창에 지금 장면이 나와요." : "수업 화면은 이미 열려 있어요. 그 창을 앞으로 가져왔어요.";
+      render(); return;
+    }
     const target = screenObjs ? screenObjs[Number(C.monitor) - 1] : null;
     const feat = target ? "popup,left=" + target.availLeft + ",top=" + target.availTop + ",width=" + target.availWidth + ",height=" + target.availHeight : "popup,width=1280,height=720";
     let w = null;
@@ -5509,12 +5613,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
       const st = d.createElement("style"); st.textContent = document.querySelector("style").textContent; d.head.appendChild(st);
       const fl = document.querySelector('link[rel="stylesheet"]');
       if (fl) { const l = d.createElement("link"); l.rel = "stylesheet"; l.href = fl.href; d.head.appendChild(l); }
-      d.addEventListener("click", onClick);
-      d.addEventListener("keydown", onKey);
-      ["mousemove", "touchstart", "keydown"].forEach((e) => d.addEventListener(e, () => wakeDoc(d), { passive: true }));
-      w.addEventListener("beforeunload", () => { stageWin = null; setTimeout(render, 0); });
-      w.addEventListener("message", onYt);
-      stageWin = w;
+      hookStage(w, d);
+      const sc = d.createElement("script"); sc.textContent = STAGE_WATCH; d.body.appendChild(sc);
+      stageWin = w; stageHeld = false;
       stageMsg = target ? "수업 화면을 " + (Number(C.monitor)) + "번 모니터에 띄웠어요. 창 안의 ‘전체 화면’을 눌러 주세요." : "수업 화면을 열었어요. TV로 옮긴 뒤(Windows 키 + Shift + →) 창 안의 ‘전체 화면’을 눌러 주세요. 모니터가 하나면 창이 교사 화면 위에 떠요.";
       wakeDoc(d);
       renderStageWin();
@@ -5528,11 +5629,14 @@ button.pchip { cursor: pointer; font-family: inherit; }
   }
   function renderStageWin() {
     const d = stageDoc();
-    if (!d) return;
+    if (!d) { stageHeld = false; return; }
+    stageLetGo();
+    if (stageHeld) return;
     const root = d.getElementById("stage-root");
     if (!root) return;
     d.documentElement.setAttribute("data-navi-theme", document.documentElement.getAttribute("data-navi-theme") || "light");
     d.documentElement.setAttribute("style", document.documentElement.getAttribute("style") || "");
+    d.documentElement.setAttribute("data-navi-owner", ownerTag || "-");
     // a rehearsal stays on the teacher screen: the student window keeps showing the class as it is (not started yet, or the scene it is on)
     let html;
     vidSeen(rehearsing ? liveS : S);
@@ -5571,9 +5675,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!keepFrame(root, html)) root.innerHTML = html;
     root.__html = html;
   }
-  window.addEventListener("beforeunload", () => { try { if (stageWin) stageWin.close(); } catch (e) {} });
   function stageButton() {
-    return stageDoc() ? '<button class="btn small ghost" data-act="stage-open" title="수업 화면을 다시 띄워요"><span class="dot on"></span>수업 화면 켜짐</button>' : '<button class="btn small warm" data-act="stage-open">수업 화면 열기</button>';
+    if (stageHeld && stageDoc()) return '<button class="btn small ghost" data-act="stage-open" title="수업 화면 창을 앞으로 가져와요"><span class="dot"></span>수업 화면 다시 연결 전</button>';
+    return stageLive() ? '<button class="btn small ghost" data-act="stage-open" title="수업 화면을 다시 띄워요"><span class="dot on"></span>수업 화면 켜짐</button>' : '<button class="btn small warm" data-act="stage-open">수업 화면 열기</button>';
   }
   // the sidebar: where the teacher is, and what the student screen and phone are doing, said plainly
   function sideNav() {
@@ -5823,7 +5927,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // teacher screen head: where we are, the time line, the clocks, then the student screen and phone state; tools and less-used things fold away
   function presHead() {
     const d = curSlide();
-    const warn = C.presenter && !rehearsing && !stageDoc()
+    const warn = C.presenter && !rehearsing && !stageLive()
       ? '<div class="pv-warn' + (stageFail ? "" : " calm") + '" role="status"><span>' + esc(stageFail ? "수업 화면이 열리지 않았어요. 주소창 오른쪽의 팝업 차단 아이콘 → ‘항상 허용’을 누른 뒤 다시 열어 주세요." : "수업 화면이 열려 있지 않아요. 전자칠판 · TV에 보여 주려면 열어요.") + "</span>" +
         '<button class="btn small' + (stageFail ? " warm" : "") + '" data-act="stage-open">수업 화면 열기</button></div>' : "";
     const more = moreOpen ? '<div class="more-menu" role="menu">' +
@@ -6107,6 +6211,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
     ev.stopPropagation();
   }, true);
   function draw() {
+    stageLetGo();
     applyTheme();
     const ae = document.activeElement;
     const keep = ae && ae.id && app.contains(ae) && ae.type !== "file" ? { id: ae.id, val: "value" in ae ? ae.value : null, s: ae.selectionStart, e: ae.selectionEnd } : null;
@@ -6246,7 +6351,8 @@ button.pchip { cursor: pointer; font-family: inherit; }
       // browser at once) and waits for the server to have the end before signing out
       case "logout":
         if (liveClass() && isHub() && holds() && !rehearsing) { logoutAsk = true; render(); break; }
-        if (window.naviAuth) mineDone().then(() => window.naviAuth.signOut());
+        // the student window goes with the teacher: nothing of this class stays on the TV of a shared PC (2026-11-19)
+        if (window.naviAuth) { stageQuit(); mineDone().then(() => window.naviAuth.signOut()); }
         break;
       case "logout-yes": {
         if (loggingOut || !window.naviAuth) break;
@@ -6254,7 +6360,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
         if (liveClass() && isHub() && holds() && !rehearsing) endLesson();
         render();
         const t0 = Date.now();
-        const out = () => { if (ownQ.length && Date.now() - t0 < 6000) { setTimeout(out, 150); return; } mineDone().then(() => window.naviAuth.signOut()); };
+        const out = () => { if (ownQ.length && Date.now() - t0 < 6000) { setTimeout(out, 150); return; } stageQuit(); mineDone().then(() => window.naviAuth.signOut()); };
         out();
         break;
       }
@@ -6864,11 +6970,28 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // the browser says the network is gone: a linked phone stops steering at once instead of waiting for Firestore to notice
   window.addEventListener("offline", () => { if (db) { synced = false; render(); } else if (mineBusy) render(); });
   window.addEventListener("online", () => { if (ownQ.length) ownKick(); });
+  // a student window kept from before a reload is taken back only once it is known whose page this is (2026-11-19, docs/STAGE-KEEP.md)
+  const adoptReady = () => {
+    if (window.__naviAdoptReady) return;
+    window.__naviAdoptReady = true; window.__naviAdopt = adoptStage;
+    // the window hands itself over within half a second: only after that is a missing one said to be closed
+    // (drawn again only when that line is on screen: an extra redraw would replace what the teacher is pressing)
+    setTimeout(() => { stageLooked = true; if (runOffer && !role && C.presenter && !stageDoc()) render(); }, 1200);
+  };
+  // the monitor chosen in 발표 설정, where the browser already allows listing monitors (no question asked): a student window opened
+  // after a reload goes to that monitor again, as it did before the reload
+  (async () => {
+    try {
+      if (!("getScreenDetails" in window) || !navigator.permissions) return;
+      const p = await navigator.permissions.query({ name: "window-management" });
+      if (p.state === "granted" && !screenObjs) screenObjs = (await window.getScreenDetails()).screens;
+    } catch (e) {}
+  })();
   (async () => {
     // the sign-in helper redraws the screen as it goes (a PIN request waiting for the PC, an error), signed in or not
     if (window.naviAuth) window.naviAuth.onChange(render);
     // no shared store here: records and edited lessons stay in this browser
-    if (!window.claude || !window.claude.use) { storeOk = true; loadLocal(); return; }
+    if (!window.claude || !window.claude.use) { storeOk = true; loadLocal(); adoptReady(); return; }
     try {
       db = await window.claude.use("db");
       if (db) {
@@ -6877,6 +7000,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
         storeOk = true;
         // linked (1단계-1): records, recent lessons and the run copy are still in this browser
         if (keepsHere()) loadLocal();
+        adoptReady();
         refD = db.doc("lessons/deck"); refC = db.doc("lessons/settings"); refH = db.doc("lessons/hub");
         refH.onSnapshot((snap) => {
           hub = snap.exists ? snap.data() : null;
@@ -6940,7 +7064,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       }
     } catch (e) { db = null; }
     // signed in but the account could not be opened (Firebase did not load): this device only, and the records still stay apart from other teachers' (shared PC)
-    if (!db) { const au = window.naviAuth; if (au && au.uid) ownerTag = au.uid; storeOk = true; loadLocal(); }
+    if (!db) { const au = window.naviAuth; if (au && au.uid) ownerTag = au.uid; storeOk = true; loadLocal(); adoptReady(); }
     try { assets = await window.claude.use("assets"); } catch (e) { assets = null; }
     try { sample = await window.claude.use("sample"); render(); } catch (e) { sample = null; }
   })();

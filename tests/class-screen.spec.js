@@ -211,3 +211,71 @@ test("교사의 실제 흐름: 준비 화면에서 ‘수업 화면 열기’ �
   expect(await words(again)).not.toMatch(OLD);
   expect(real(errors)).toEqual([]);
 });
+
+// ---------- 교사 PC 새로고침과 수업 화면 창(2026-11-19, PR #26, docs/STAGE-KEEP.md) · 로그인한 교사 ----------
+// 창은 그대로 두고 이어서 하기 전에는 마지막 장면(교사 PC가 다시 그리기 전), 휴대폰은 그동안 ‘수업 화면 · 열려 있지 않아요’.
+// 이어서 하기 → 새 창 없이 그 창이 지금 장면(휴대폰이 그사이 넘긴 것까지). 공용 PC 로그아웃은 그 창을 바로 닫고,
+// 앱의 로그아웃을 거치지 않고 다른 계정(로그인 안 함)이 된 새로고침에서도 그 창을 넘겨받지 않고 닫아요
+test("로그인한 교사 PC: 수업 화면을 연 채 새로고침해도 그 창 그대로, 이어서 하기 뒤 휴대폰이 넘긴 장면까지 그 창에. 로그아웃하면 그 창도 바로 닫혀요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacher(browser, errors);
+  const ph = await phoneJoins(browser, errors, await qrUrl(pc.page), pc.who);
+  await toFlow(pc.page);
+  await pc.page.getByRole("button", { name: "수업 시작" }).click();
+  await expect.poll(() => pc.popups.length).toBe(1);
+  const stage = pc.popups[0];
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await nextBtn(pc.page).click();
+  await expect(chip(stage)).toHaveText(LABELS[1]);
+  await pc.page.waitForTimeout(600);
+  await pc.page.reload();
+  const offer = pc.page.locator(".run-offer");
+  await expect(offer).toContainText("끝나지 않은 수업이 있어요", { timeout: 30000 });
+  await expect(offer).toContainText("수업 화면(TV)은 열린 그대로예요");
+  expect(stage.isClosed()).toBe(false);
+  await expect(stage.locator(".stage-wait")).toHaveText("교사 화면과 다시 연결하는 중이에요");
+  await expect(chip(stage)).toHaveText(LABELS[1]);
+  // 그사이 휴대폰이 넘겨요: 휴대폰은 수업 화면이 아직 이어지지 않았다고 말하고, 그 창은 마지막 장면 그대로
+  await expect(phoneLabel(ph)).toContainText("열려 있지 않아요");
+  await nextBtn(ph.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[2]);
+  await expect(offer).toContainText("3 / " + LABELS.length);
+  await expect(chip(stage)).toHaveText(LABELS[1]);
+  await offer.getByRole("button", { name: "이어서 하기" }).click();
+  await expect(chip(stage)).toHaveText(LABELS[2]);
+  await expect(stage.locator(".stage-wait")).toHaveCount(0);
+  await expect(phoneLabel(ph)).not.toContainText("열려 있지 않아요");
+  expect(pc.popups.length, "새 창을 열지 않아요").toBe(1);
+  await nextBtn(ph.page).click();
+  await expect(chip(stage)).toHaveText(LABELS[3]);
+  await expect(curLabel(pc.page)).toHaveText(LABELS[3]);
+  // 끝내고 로그아웃(공용 PC): 기록은 하나, 그 창은 바로 닫혀요
+  await pc.page.keyboard.press("End");
+  await finishLesson(pc.page);
+  await expect(chip(stage)).toHaveText("수업 끝");
+  expect((await localRecords(pc.page)).length).toBe(1);
+  const closed = stage.waitForEvent("close", { timeout: 5000 });
+  await Promise.all([pc.page.waitForEvent("load"), pc.page.locator(".logout-hint").getByRole("button", { name: "로그아웃" }).click()]);
+  await closed;
+  await expect(pc.page.getByRole("button", { name: /구글로 로그인/ }).first()).toBeVisible({ timeout: 20000 });
+  await pc.page.waitForTimeout(1500);
+  expect(pc.popups.length).toBe(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("앱의 로그아웃을 거치지 않고 로그인이 풀린 새로고침(다른 계정 · 로그인 안 함)은 남은 수업 화면 창을 넘겨받지 않고 닫아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacher(browser, errors);
+  await toFlow(pc.page);
+  await pc.page.getByRole("button", { name: "수업 시작" }).click();
+  await expect.poll(() => pc.popups.length).toBe(1);
+  const stage = pc.popups[0];
+  await nextBtn(pc.page).click();
+  await expect(chip(stage)).toHaveText(LABELS[1]);
+  const closed = stage.waitForEvent("close", { timeout: 15000 });
+  // 로그인 도우미에서 바로 로그아웃(앱의 단추를 거치지 않음) → 페이지가 다시 열려요
+  await Promise.all([pc.page.waitForEvent("load"), pc.page.evaluate(() => window.naviAuth.signOut()).catch(() => {})]);
+  await closed;
+  expect(pc.popups.length).toBe(1);
+  expect(real(errors)).toEqual([]);
+});

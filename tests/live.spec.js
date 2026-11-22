@@ -124,8 +124,13 @@ test("수업 복구: 새로고침해도 장면·시간·신호등·질문 메모
     await expect(offer).toContainText("3 / " + L.pages.length);
     await expect(offer).toContainText("신호등 1개");
     await expect(offer).toContainText("질문 메모 1개");
-    const [again] = await Promise.all([page.waitForEvent("popup"), offer.getByRole("button", { name: "이어서 하기" }).click()]);
-    watch(again, errors);
+    // 수업 화면 창은 새로고침해도 그대로예요(2026-11-19, docs/STAGE-KEEP.md): 이어서 하기는 새 창 없이 그 창에 지금 화면을 다시 그려요
+    await expect(offer).toContainText("수업 화면(TV)은 열린 그대로예요");
+    const popups = page.context().pages().length;
+    await offer.getByRole("button", { name: "이어서 하기" }).click();
+    const again = stage;
+    await expect(again.locator(".stage-wait")).toHaveCount(0);
+    expect(page.context().pages().length, "새 창을 열지 않아요").toBe(popups);
     await expect(curLabel(page)).toHaveText(red.label);
     await expect(page.locator(".pv .prompter")).toContainText("조각의 크기를 겹쳐서 비교해 볼까요?");
     await expect(page.locator(".sig.s-red")).toHaveAttribute("aria-pressed", "true");

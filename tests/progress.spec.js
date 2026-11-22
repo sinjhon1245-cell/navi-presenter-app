@@ -44,14 +44,19 @@ async function seed(page, deck) {
   await expect(page.locator(".sbar-title b")).toHaveText(deck.title);
 }
 // 수업 시작(파일 수업은 넣어 둔 ‘끝나지 않은 수업’을 이어서 해요)
+// 수업 화면 창은 페이지를 다시 열어도 그대로라(2026-11-19, docs/STAGE-KEEP.md), 이미 열려 있으면 새 창 없이 그 창을 그대로 써요
+let stageOpen = null;
 async function start(page) {
   // 끝나지 않은 수업은 내 수업 맨 위 알림의 ‘이어서 하기’, 새 수업은 수업 준비의 ‘수업 시작’
   if (!resumeNext) await toFlow(page);
   const go = resumeNext ? page.locator(".run-offer").getByRole("button", { name: "이어서 하기" }) : page.getByRole("button", { name: "수업 시작" });
   resumeNext = false;
-  const [stage] = await Promise.all([page.waitForEvent("popup"), go.click()]);
+  const kept = stageOpen && !stageOpen.isClosed() && stageOpen.context() === page.context() ? stageOpen : null;
+  if (kept) await go.click();
+  else [stageOpen] = await Promise.all([page.waitForEvent("popup"), go.click()]);
   await expect(page.locator(".pv-head .prog")).toBeVisible();
-  return stage;
+  if (kept) await expect(kept.locator(".stage-wait")).toHaveCount(0);
+  return stageOpen;
 }
 const head = (page) => page.locator(".pv-head");
 const count = (page) => head(page).locator(".prog-n");
