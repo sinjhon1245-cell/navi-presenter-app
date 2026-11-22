@@ -1369,3 +1369,95 @@ test("공용 PC 로그아웃: 수업 중에는 확인 줄(계속 수업 · 기�
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(2);
   expect(real(errors)).toEqual([]);
 });
+
+// ---------- 끝난 수업과 새로 고른 수업(2026-11-22) ----------
+// 수업이 끝난 뒤 교사 PC 창을 새로 열면(새로고침 · 다음 날) 그 창은 아직 수업을 맡지 않았어요. 거기서 다른 수업을 고르면 계정의 끝난 세션도
+// 함께 비워요(수업 고르기 = 교사의 행동이라 맡아도 돼요). 예전에는 그 창의 화면만 비워서, 휴대폰이 앞 수업의 끝 화면에 새 수업 제목 · 장면을 섞어 보여 줬어요
+const acctRecords = async (uid) => ((await fetch(docUrl("teachers/" + uid + "/records") + "?pageSize=50", { headers: { Authorization: "Bearer owner" } }).then((r) => r.json())).documents || []);
+const pickExample = async (page, id) => {
+  await page.getByRole("tab", { name: "예시 수업" }).click();
+  await page.locator('.lcard[data-v="' + id + '"]').click();
+  await page.locator('.lib-sum [data-act="lib-open"], .lib-sum [data-act="lib-close"]').first().click();
+};
+async function endedThenNewWindow(browser, errors) {
+  const who = email("teacher");
+  const pc = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, pc.url, who);
+  pc.pin = pinOf(pc.url); pc.uid = await uidOf(pc);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0]);
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await finishLesson(pc.page);
+  await expect(pc.page.locator(".memo-sheet")).toContainText("계정에 저장했어요", { timeout: 20000 });
+  await expect(ph.page.locator(".memo-sheet")).toBeVisible();
+  const ended = await sessionOf(pc);
+  expect(field(ended, "ended")).toBe(true);
+  expect(field(ended, "memoId")).toBeTruthy();
+  // 교사 PC 창을 닫고 새로 열어요: 이 창은 아직 수업을 맡지 않았어요
+  await pc.stage.close().catch(() => {});
+  await pc.page.close();
+  const page = await pc.ctx.newPage();
+  watch(page, errors);
+  await page.goto("/");
+  await pcLinked(page);
+  return { pc: Object.assign(pc, { page }), ph, ended };
+}
+
+test("수업이 끝난 뒤 새 PC 창에서 다른 수업을 고르면: 계정의 끝난 세션을 비워 휴대폰은 새 수업을 기다려요(앞 수업 끝 화면에 새 제목이 섞이지 않음). 기록은 한 건 그대로", async ({ browser }) => {
+  const errors = [];
+  const { pc, ph, ended } = await endedThenNewWindow(browser, errors);
+  const other = DATA.lessons.find((L) => L.id === "ex-m3-fraction");
+  await pickExample(pc.page, other.id);
+  await expect.poll(async () => field((await classDocs(pc.uid, pc.pin))["lessons/deck"], "lessonId")).toBe(other.id);
+  // 계정의 세션: 비워졌고(끝난 앞 수업이 남지 않음), 새로 시작하지도 않았어요
+  await expect.poll(async () => field(await sessionOf(pc), "ended"), { timeout: 15000 }).toBe(false);
+  const now = await sessionOf(pc);
+  expect(field(now, "started"), "고르기만 했는데 수업이 시작됐어요").toBe(false);
+  expect(field(now, "memoId") || null).toBe(null);
+  // 휴대폰: 앞 수업의 끝 화면이 아니라 새 수업을 기다리는 화면
+  await expect(ph.page.locator(".memo-sheet")).toHaveCount(0, { timeout: 15000 });
+  await expect(ph.page.locator(".ph-hero h1")).toHaveText(other.title);
+  await expect(ph.page.locator("body")).not.toContainText("못 했어요");
+  // 앞 수업의 기록은 그대로 한 건(지워지거나 늘지 않음)
+  expect((await localRecords(pc.page)).length).toBe(1);
+  const acct = await acctRecords(pc.uid);
+  expect(acct.length).toBe(1);
+  expect(acct[0].name.endsWith("/r-" + Number(field(ended, "t0")).toString(36))).toBe(true);
+  expect(real(errors)).toEqual([]);
+});
+
+test("수업이 끝난 뒤 새 PC 창을 열기만 하면: 계정의 끝난 세션 · 수업 · 허브를 쓰지 않아요(휴대폰은 그 수업의 끝 화면 그대로)", async ({ browser }) => {
+  const errors = [];
+  const { pc, ph, ended } = await endedThenNewWindow(browser, errors);
+  const before = await classDocs(pc.uid, pc.pin);
+  await pc.page.waitForTimeout(2500);
+  const after = await classDocs(pc.uid, pc.pin);
+  expect(after["sessions/s" + pc.pin].updateTime, "세션을 다시 썼어요").toBe(before["sessions/s" + pc.pin].updateTime);
+  expect(after["lessons/deck"].updateTime, "수업을 다시 썼어요").toBe(before["lessons/deck"].updateTime);
+  expect(field(after["sessions/s" + pc.pin], "memoId")).toBe(field(ended, "memoId"));
+  await expect(ph.page.locator(".memo-sheet")).toBeVisible();
+  expect(real(errors)).toEqual([]);
+});
+
+test("다른 PC가 수업 중일 때 이 PC에서 다른 수업을 골라도: 그 수업의 세션은 그대로(초기화되지 않음), 휴대폰도 그 수업을 따라가요", async ({ browser }) => {
+  const errors = [], who = email("teacher");
+  const a = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, a.url, who);
+  a.pin = pinOf(a.url); a.uid = await uidOf(a);
+  await nextBtn(a.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  const live = await sessionOf(a);
+  const b = await otherPc(browser, errors, who);
+  await pickExample(b.page, "ex-m3-fraction");
+  await b.page.waitForTimeout(2500);
+  const now = await sessionOf(a);
+  expect(field(now, "started")).toBe(true);
+  expect(field(now, "ended")).toBe(false);
+  expect(field(now, "t0")).toBe(field(live, "t0"));
+  expect(now.updateTime, "다른 PC가 수업 중인 세션을 썼어요").toBe(live.updateTime);
+  expect(field((await classDocs(a.uid, a.pin))["lessons/deck"], "lessonId")).not.toBe("ex-m3-fraction");
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await nextBtn(a.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[2]);
+  expect(real(errors)).toEqual([]);
+});

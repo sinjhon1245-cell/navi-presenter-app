@@ -4587,8 +4587,18 @@ button.pchip { cursor: pointer; font-family: inherit; }
     commitD(Object.assign({}, D, { pages: pinStages(pages()).concat(more) }));
   }
   function resetSessionLocal() {
-    // a PC that does not hold the class clears only its own screen: the class on the account stays as it is
-    if (isHub() && !holds()) { S = blankS(); return; }
+    // a PC that does not hold the class clears only its own screen: the class on the account stays as it is.
+    // One exception (2026-11-22): the account's class has ended and its record was made (memoId). A new PC window
+    // (a reload, the next day) never holds the class at first, so picking a lesson there used to leave that ended class
+    // on the account, and a phone showed the last class's end under the new lesson's title. Picking a lesson is the
+    // teacher's own act, so the cleared class goes through sendOwn: it takes the class only if nobody holds it
+    // (another PC's class, live or not, is never touched), and with no record made the ended class is left alone
+    if (isHub() && !holds()) {
+      const ended = !!(liveS.started && liveS.ended && liveS.memoId);
+      S = blankS();
+      if (ended && refS && !rehearsing) sendOwn(sessionPath(), "set", clone(S), S);
+      return;
+    }
     S = blankS(); liveS = S;
     if (refS) { if (isHub()) sendOwn(sessionPath(), "set", clone(S), S); else refS.set(clone(S)).catch(() => {}); }
     saveRun();
