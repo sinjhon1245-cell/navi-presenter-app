@@ -6070,6 +6070,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // the way from the record sheet to the records (2026-11-16): the main button, and only for a record that is really kept here.
   // A phone shows it when the same account keeps the records; otherwise it says where the record is
   const recGoBtn = (saved) => {
+    // a phone never reads the records: they stay on the teacher PC (docs/STABILITY.md). No button that waits for a record
+    // the phone will never get; the line above says where the record is (2026-11-22)
+    if (role === "remote" && keepsHere()) return "";
     if (role === "remote" && !(db && db.account && !db.account.device)) return '<span class="muted small-text rec-where">기록은 교사 PC에서 볼 수 있어요.</span>';
     if (!saved) return '<button class="btn primary rec-go" disabled>' + (localOK === false ? "기록을 저장하지 못했어요" : "기록을 저장하는 중…") + "</button>";
     return '<button class="btn primary rec-go" data-act="rec-goto" data-v="' + esc(S.memoId || "") + '">' + ic("history", 18) + "수업 기록 보기</button>";
@@ -6089,7 +6092,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
         : ss === "wait" ? '<div class="warn-note">인터넷이 끊겨 아직 계정에 저장하지 못했어요. 이 브라우저에는 저장했고, 다시 이어지면 계정에 저장해요.</div>'
         : ss === "fail" ? '<div class="warn-note">계정에 저장하지 못했어요. 이 브라우저에는 저장돼 있어요. <button class="btn small" data-act="rec-push" data-v="' + esc(saved.id) + '">다시 저장</button></div>'
         : '<div class="muted small-text">계정에 저장하는 중이에요… 이 브라우저에는 저장했어요.</div>')
-      : db && !isHub() && keepsHere() ? (S.memoId ? '<div class="ok-text">교사 PC 브라우저에 기록을 저장했어요.' + (db && db.account && !db.account.device ? " 계정 저장은 교사 PC 화면에서 확인해요." : "") + "</div>" : '<div class="muted small-text">교사 PC가 기록을 저장하는 중이에요.</div>')
+      // a phone sees only that the teacher PC made the record (S.memoId), never whether this browser or the account kept it:
+      // it does not say 'saved'. The teacher PC says that (2026-11-22)
+      : db && !isHub() && keepsHere() ? (S.memoId ? '<div class="note rec-far">교사 PC가 이 수업의 기록을 만들었어요. 저장됐는지는 교사 PC 화면에서 확인해 주세요.</div>' : '<div class="muted small-text rec-far">교사 PC가 기록을 만드는 중이에요.</div>')
       : !keepsHere() ? (S.memoId ? '<div class="ok-text">수업 기록에 저장했어요. 다음에 이 수업을 열면 첫 장면에서 보여요.</div>' : '<div class="muted small-text">기록을 저장하는 중이에요.</div>')
       : localOK === false ? '<div class="warn-note">이 브라우저에 저장할 수 없어서 이 기록은 이 창에만 남아요. ‘글로 복사’로 남겨 두세요.</div>'
       : '<div class="note">이 브라우저에 저장했어요. 브라우저 데이터를 지우거나 다른 기기에서는 보이지 않아요.</div>';
