@@ -1,0 +1,21 @@
+{
+  "name": "navi-presenter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "수업 내비: 교탁 PC · TV · 휴대폰으로 수업하는 프레젠터 겸 프롬프터",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/serve.js",
+    "test": "playwright test",
+    "test:emu": "firebase emulators:exec --only auth,firestore --project demo-navi \"playwright test --project=firebase\"",
+    "test:all": "firebase emulators:exec --only auth,firestore --project demo-navi \"playwright test\"",
+    "emu": "firebase emulators:start --only auth,firestore --project demo-navi"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "@playwright/test": "1.64.1",
+    "firebase": "12.19.0",
+    "firebase-tools": "15.33.0",
+    "jsqr": "1.4.0"
+  }
+}

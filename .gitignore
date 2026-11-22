@@ -1,0 +1,33 @@
+# 설치 폴더
+node_modules/
+
+# 비밀 값 (예시 파일만 올림)
+.env
+.env.*
+!.env.example
+
+# Vercel
+.vercel/
+
+# Supabase CLI 로컬 임시 파일
+supabase/.temp/
+supabase/.branches/
+
+# Playwright 결과물
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# 로그
+*.log
+npm-debug.log*
+
+# Claude Code 개인 설정
+.claude/settings.local.json
+
+# 운영체제 · 편집기
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/

@@ -1,0 +1,99 @@
+// 수업 내비 1단계-1 Firestore 보안 규칙
+// 배포: 전용 프로젝트 navi-presenter-fd289에만, 교사 승인 뒤(firebase deploy --only firestore:rules). 설계는 docs/STAGE1-1-REALTIME.md
+// 원칙: 구글로 로그인한 교사는 teachers/{자기 UID} 아래만 읽고 쓴다. PIN · 세션 이름을 알아도 그 교사가 아니면 거절. 그 밖은 모두 막는다.
+// 학생 정보는 들어가지 않는다(반 이름 · 인원 수 · 교사의 신호등 판단 · 질문 메모 120자).
+// 시험: tests/rules.spec.js(Firebase 에뮬레이터). 칸 이름을 바꾸면 앱(public/index.html의 lessonDeck · newDeck · defaultC · blankS)과 함께 바꾼다.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 수업 내비는 구글 로그인만 써요. 다른 방식(익명 · 이메일 등)으로 로그인한 계정은 자기 UID 자리라도 읽고 쓰지 못해요
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+
+    // 선택 칸: 없거나(null 포함), 있으면 그 자료형 · 길이
+    function optString(d, k, max) {
+      return !(k in d) || d[k] == null || (d[k] is string && d[k].size() <= max);
+    }
+    function optNumber(d, k) {
+      return !(k in d) || d[k] == null || d[k] is number;
+    }
+    function optBool(d, k) {
+      return !(k in d) || d[k] is bool;
+    }
+    function optList(d, k, max) {
+      return !(k in d) || (d[k] is list && d[k].size() <= max);
+    }
+
+    // 세션 문서에 올 수 있는 칸. 개수 상한은 앱(80 · 40 · 80)보다 넉넉하게, 지나치게 커지는 것만 막는다
+    function validSession(d) {
+      return d.keys().hasOnly(['v', 'started', 'ended', 'cur', 't0', 'enteredAt', 'log', 'reactions', 'qs', 'used', 'tv', 'blank', 'tool', 'memoId', 'at'])
+        && optList(d, 'log', 300)
+        && optList(d, 'reactions', 300)
+        && optList(d, 'qs', 120)
+        && optList(d, 'used', 200);
+    }
+
+    // 지금 수업 내용(lessons/deck): 예시 수업(lessonDeck) · 올린 파일 수업(newDeck)이 쓰는 칸만.
+    // 장면(pages) · 수업 자료(res) 안쪽은 수업마다 달라서 목록 크기만 봐요(문서 하나는 Firestore가 1MiB로 막아요)
+    function validDeck(d) {
+      return d.keys().hasOnly(['v', 'kind', 'lessonId', 'key', 'oldKeys', 'title', 'tag', 'grade', 'subject', 'total', 'pages', 'res', 'prep', 'srcLink'])
+        && d.keys().hasAll(['v', 'kind', 'title', 'pages', 'res'])
+        && d.v is int
+        && d.kind in ['example', 'pdf', 'pptx']
+        && d.title is string && d.title.size() <= 200
+        && d.pages is list && d.pages.size() <= 100
+        && d.res is list && d.res.size() <= 400
+        && optString(d, 'lessonId', 100)
+        && optString(d, 'key', 300)
+        && optString(d, 'tag', 300)
+        && optString(d, 'subject', 40)
+        && optString(d, 'srcLink', 1000)
+        && optList(d, 'oldKeys', 20)
+        && optNumber(d, 'grade')
+        && optNumber(d, 'total')
+        && (!('prep' in d) || d.prep in ['ai', 'basic']);
+    }
+
+    // 설정(lessons/settings): 앱의 발표 설정(defaultC)이 쓰는 칸만. PIN은 숫자 4자리, 반 이름은 짧게, 인원 수는 1–40
+    function validSettings(d) {
+      return d.keys().hasOnly(['v', 'monitor', 'presenter', 'strength', 'reactions', 'ai', 'theme', 'palette', 'pin', 'className', 'classSize',
+          'fontSize', 'showConcepts', 'showNotes', 'showNext', 'pace', 'tapNav', 'liveTone'])
+        && d.pin is string && d.pin.matches('[0-9]{4}')
+        && optNumber(d, 'v')
+        && optString(d, 'className', 40)
+        && (!('classSize' in d) || (d.classSize is int && d.classSize >= 1 && d.classSize <= 40))
+        && optString(d, 'monitor', 20)
+        && optString(d, 'strength', 10)
+        && optString(d, 'theme', 10)
+        && optString(d, 'palette', 20)
+        && optString(d, 'fontSize', 10)
+        && optString(d, 'liveTone', 10)
+        && optBool(d, 'presenter') && optBool(d, 'reactions') && optBool(d, 'ai')
+        && optBool(d, 'showConcepts') && optBool(d, 'showNotes') && optBool(d, 'showNext')
+        && optBool(d, 'pace') && optBool(d, 'tapNav');
+    }
+
+    match /teachers/{uid} {
+      allow read, write: if false;
+
+      // 지금 수업 내용(lessons/deck)과 설정(lessons/settings). 교사 PC가 쓰고 휴대폰은 읽는다
+      match /lessons/{name} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && ((name == 'deck' && validDeck(request.resource.data))
+            || (name == 'settings' && validSettings(request.resource.data)));
+        allow delete: if false;
+      }
+
+      // 수업 진행 상태(sessions/s{PIN})
+      match /sessions/{sid} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && sid.matches('s[0-9]{4}') && validSession(request.resource.data);
+        allow delete: if false;
+      }
+    }
+  }
+}
