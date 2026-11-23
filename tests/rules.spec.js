@@ -794,3 +794,21 @@ test("PIN 스위치가 꺼지면(config/pin 없음): 구글 계정도 PIN 자리
   await assertFails(getDoc(doc(as(B), "teachers/" + A + "/decks/" + MID)));
   await assertFails(getDoc(doc(as(B), "teachers/" + A + "/sessions/s1234")));
 });
+
+// 수업 시계(2026-11-23, PR #27 · docs/CLASS-CLOCK.md): 세션의 선택 칸 by = { pc, at } — 수업을 맡은 PC 창이 자기 거래 안에서 쓴 쓰기라는 표시.
+// 따라가는 기기가 시계 표본을 고르는 데만 써요(수업 제어 · 권한은 지금처럼 hub.pc + 거래). 같은 계정의 기기는 규칙으로 구별되지 않아서 규칙은 모양만 봐요
+test("세션 by: { pc, at }는 모양만 받아요(없음 · null도 돼요). 다른 키 · 64자 넘는 pc · 숫자가 아닌 at · 지도 아닌 값은 거절, 다른 교사는 못 써요", async () => {
+  const ref = (db) => doc(db, "teachers/" + A + "/sessions/s1234");
+  const a = as(A);
+  await assertSucceeds(updateDoc(ref(a), { at: 10, by: { pc: "b1c2d3e4f5a6-0a1b2c3d4e5f", at: 10 } }));
+  await assertSucceeds(updateDoc(ref(a), { by: null }));
+  await assertSucceeds(setDoc(ref(a), Object.assign(session(), { at: 11, by: { pc: "p", at: 11 } })));
+  await assertSucceeds(setDoc(ref(a), session()));
+  await assertFails(updateDoc(ref(a), { by: { pc: "p", at: 1, extra: 1 } }));
+  await assertFails(updateDoc(ref(a), { by: { pc: "x".repeat(65), at: 1 } }));
+  await assertFails(updateDoc(ref(a), { by: { pc: "p", at: "1" } }));
+  await assertFails(updateDoc(ref(a), { by: { pc: 5, at: 1 } }));
+  await assertFails(updateDoc(ref(a), { by: { pc: "p" } }));
+  await assertFails(updateDoc(ref(a), { by: "pc" }));
+  await assertFails(updateDoc(ref(as(B)), { at: 12, by: { pc: "p", at: 12 } }));
+});
