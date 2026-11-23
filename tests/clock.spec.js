@@ -975,3 +975,36 @@ test("시계 30 · 비용: 수업 중에 연 휴대폰 한 대를 맞추는 데 
   expect(row.otherPhoneWrites, "이미 맞춘 휴대폰: 0").toBe(0);
   expect(real(errors)).toEqual([]);
 });
+
+test("시계 31 · 맞춘 휴대폰 두 대가 0.5초 안에 번갈아 넘겨도: 장면 시간이 음수가 아니고, 장면이 시작한 시각이 거꾸로 가지 않고, 장면 합 = 전체 = 끝 − 시작", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(25000);
+  // 둘 다 수업 중에 열어 따로 맞춰요(맞춘 시계는 서로 수백 ms 안에서 달라요)
+  const [a, c] = await Promise.all([lateJoin(browser, errors, pc, 30000), lateJoin(browser, errors, pc, -20000)]);
+  await Promise.all([synced(a, 30000), synced(c, 30000)]);
+  await pc.page.waitForTimeout(1500);
+  const row = { aErrMs: await syncErr(a.page, 30000), cErrMs: await syncErr(c.page, -20000), pairs: 0 };
+  // 번갈아 빠르게: A가 넘기면 C가 그 장면을 받자마자(0.5초 안) 넘겨요. 세 번
+  let k = 0;
+  for (let i = 0; i < 3; i++) {
+    await nextBtn(a.page).click(); k++;
+    await expect(curLabel(c.page)).toHaveText(LABELS[k], { timeout: 20000 });
+    await nextBtn(c.page).click(); k++;
+    await expect(curLabel(a.page)).toHaveText(LABELS[k], { timeout: 20000 });
+    row.pairs++;
+  }
+  await pc.page.waitForTimeout(2000);
+  const s = await readDoc(pc.page, "sessions/s" + pc.pin, { started: true });
+  // 세션 기록(log)의 장면마다 시작 시각: t0 + 앞 장면들의 시간 합. 거꾸로 가면 음수 장면이 있어요
+  row.logNegative = (s.log || []).filter((x) => x.sec < 0).map((x) => x.sec);
+  const rs = await endClass(pc, t0);
+  const r = await lastRecord(pc.page), rec = recCheck(r, rs);
+  row.scenes = r.scenes.slice(0, 8).map((x) => x.sec);
+  note(Object.assign({ case: "맞춘 휴대폰 두 대가 빠르게 번갈아" }, row, rec));
+  expect(row.logNegative, "세션 기록에 음수 장면 없음(시간이 거꾸로 가지 않음)").toEqual([]);
+  recOk(rec);
+  expect(Math.abs(rec.total - rec.endMinusStart), "전체 = 끝 − 시작").toBeLessThanOrEqual(0.1);
+  expect(real(errors)).toEqual([]);
+});

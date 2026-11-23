@@ -2412,7 +2412,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
     switch (c.op) {
       case "go":
         if (moved || typeof c.v !== "string" || !pageById(c.v) || c.v === S.cur) return false;
-        patchS({ log: leave(), cur: c.v, enteredAt: now(), tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null });
+        { const t = stamp(); patchS({ log: leave(t), cur: c.v, enteredAt: t, tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); }
         return mark();
       case "signal": {
         if (c.id !== S.cur || !(SIG[c.v] || c.v === "clear") || C.reactions === false) return false;
@@ -3191,8 +3191,12 @@ button.pchip { cursor: pointer; font-family: inherit; }
 
   // ---------- navigation ----------
   // a scene's time to the millisecond (R2, docs/CLASS-CLOCK.md): rounded once, in the record, so short scenes do not vanish
-  function leave() { return S.log.concat([{ id: S.cur, sec: Math.round(now() - (S.enteredAt || now())) / 1000 }]).slice(-80); }
-  function go(id) { if (id && id !== S.cur && S.started && !S.ended) { buzz(); tocOpen = false; sheetOpen = false; drawerOpen = false; lastNudge = 0; endAsk = false; sug = null; patchS({ log: leave(), cur: id, enteredAt: now(), tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); } }
+  // A move (or the end) is stamped no earlier than the start of the scene it leaves (2026-11-23, docs/CLASS-CLOCK.md 2-7): the device that
+  // moves has seen that start, so the move cannot have come before it, even when its clock (set a few hundred ms apart from the device that
+  // made that start) says so. The stored times stay in order; the next scene takes up the difference, so scenes still add up to the whole
+  const stamp = () => Math.max(now(), Number(S.enteredAt) || 0);
+  function leave(t) { const at = t === undefined ? stamp() : t; return S.log.concat([{ id: S.cur, sec: Math.round(at - (S.enteredAt || at)) / 1000 }]).slice(-80); }
+  function go(id) { if (id && id !== S.cur && S.started && !S.ended) { buzz(); tocOpen = false; sheetOpen = false; drawerOpen = false; lastNudge = 0; endAsk = false; sug = null; const t = stamp(); patchS({ log: leave(t), cur: id, enteredAt: t, tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); } }
   function next() {
     if (!S.started || S.ended) return;
     if (vidStep()) return;
