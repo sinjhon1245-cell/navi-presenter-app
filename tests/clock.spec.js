@@ -593,24 +593,24 @@ test("시계 17 · 끊긴 PC가 옛 장면에서 화면을 가림 → 그 사이
 });
 
 // ---------- 독립 리뷰에서 찾은 것(2026-11-23) ----------
-test("시계 18 · 수업 중에 새로 연 휴대폰(시계 30초 빠름, 아직 못 맞춤)이 넘긴 뒤 PC가 쓰면: 그 시각은 표본이 아니라 다른 휴대폰 시계가 끌려가지 않아요", async ({ browser }) => {
+test("시계 18 · 다른 기기 시계(30초 빠름)로 적힌 at 뒤에 PC가 쓰면: 그 시각은 표본이 아니라 다른 휴대폰 시계가 끌려가지 않아요", async ({ browser }) => {
+  // 처음(2026-11-23 리뷰)에는 ‘수업 중에 연 휴대폰이 맞추기 전에 넘김’으로 재현했어요. 이제 그 휴대폰은 맞추기 전에는 넘기지 못해서(시계 23–),
+  // 같은 상황(서버 at이 PC보다 30초 앞섬)을 예전 앱 휴대폰처럼 서버에 직접 써서 만들어요
   const errors = [];
   const pc = await teacherPc(browser, errors);
   const b = await phoneOf(browser, errors, pc);
   const t0 = await startClass(pc, errors);
   await expect(curLabel(b.page)).toHaveText(LABELS[0], { timeout: 20000 });
   await pc.page.waitForTimeout(2000);
-  // 수업 중에 연 휴대폰: 첫 값은 건너뛰고, PC가 아직 아무것도 쓰지 않아 자기 시계(30초 빠름)로 넘겨요
-  const a = await phoneOf(browser, errors, pc, 30000);
-  await expect(curLabel(a.page)).toHaveText(LABELS[0], { timeout: 20000 });
-  await nextBtn(a.page).click();
-  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
-  // 곧바로 PC가 신호를 눌러요: 서버의 at(휴대폰 시계)보다 뒤로 밀린 at이라 표본이 아니어야 해요
+  const path = "teachers/" + pc.uid + "/sessions/s" + pc.pin, ahead = Date.now() + 30000;
+  const s0 = await readDoc(pc.page, "sessions/s" + pc.pin, { started: true });
+  expect((await adminPatch(path, { at: num(ahead), enteredAt: num(ahead), cur: { stringValue: s0.cur } })).ok).toBe(true);
+  await pc.page.waitForTimeout(1500);
+  // 곧바로 PC가 신호를 눌러요: 서버의 at(빠른 시계)보다 뒤로 밀린 at이라 표본이 아니어야 해요
   await pc.page.locator(".pv-bar .sig.s-yellow").click();
-  await expect(curLabel(b.page)).toHaveText(LABELS[1]);
   await pc.page.waitForTimeout(3000);
   const row = { phoneB: await off(b.page, t0), pc: await off(pc.page, t0) };
-  note(Object.assign({ case: "못 맞춘 휴대폰의 시각" }, row));
+  note(Object.assign({ case: "빠른 시계로 적힌 at 뒤의 PC 쓰기" }, row));
   expect(Math.abs(row.phoneB), "맞춰 둔 휴대폰은 그대로").toBeLessThanOrEqual(1);
   expect(Math.abs(row.pc), "PC는 그대로").toBeLessThanOrEqual(1);
   expect(real(errors)).toEqual([]);
@@ -740,5 +740,238 @@ test("시계 22 · PC 시계가 앞으로 튄 바로 그때 넘김(사이트 시
   note(Object.assign({ case: "앞으로 튄 순간의 쓰기" }, row));
   expect(Math.abs(row.phone), "휴대폰은 그대로").toBeLessThanOrEqual(1);
   expect(Math.abs(row.pc), "PC는 사이트 시각으로 되돌려요").toBeLessThanOrEqual(1);
+  expect(real(errors)).toEqual([]);
+});
+
+// ---------- 수업 중에 새로 연 휴대폰의 첫 시계 맞추기(2026-11-23, docs/CLASS-CLOCK.md 2-6) ----------
+const syncNote = (page) => page.locator(".thumb-nav .clk-sync");
+const writes = (page) => page.evaluate(() => window.__naviWrites || 0);
+// 맞춘 시계의 오차(ms): 그 휴대폰의 clockOff − 실제 시계 차이(skew). PC는 clockOff 0
+const syncErr = async (page, skew) => Math.round((await page.evaluate(() => window.__naviClock.off)) - skew);
+// 수업이 시작된 뒤 휴대폰을 열어요(skew: 그 휴대폰 시계 차이). 맞추는 동안은 ‘수업 시간 맞추는 중’
+async function lateJoin(browser, errors, pc, skew) {
+  const ph = await phoneOf(browser, errors, pc, skew);
+  await expect(curLabel(ph.page)).toBeVisible({ timeout: 20000 });
+  return ph;
+}
+async function synced(ph, ms) {
+  await expect(syncNote(ph.page)).toHaveCount(0, { timeout: ms || 15000 });
+  await expect(ph.page.locator(".thumb-nav.frozen")).toHaveCount(0);
+}
+
+test("시계 23 · 수업 중에 연 휴대폰(시계 +30초): 맞추기 전에는 넘기지 못하고, 맞춘 뒤 화면 ±1초 · 그 휴대폰이 넘긴 장면 기록도 맞아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(8000);
+  const a = await lateJoin(browser, errors, pc, 30000);
+  await synced(a);
+  await a.page.waitForTimeout(1500);
+  const row = { phoneAfterSync: await off(a.page, t0), clockErrMs: await syncErr(a.page, 30000) };
+  const m1 = Date.now();
+  await nextBtn(a.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(4000);
+  const m2 = Date.now();
+  await nextBtn(pc.page).click();
+  await expect(curLabel(a.page)).toHaveText(LABELS[2], { timeout: 20000 });
+  await pc.page.waitForTimeout(2000);
+  row.phoneLater = await off(a.page, t0); row.pc = await off(pc.page, t0);
+  const rs = await endClass(pc, t0);
+  const r = await lastRecord(pc.page), rec = recCheck(r, rs);
+  // 장면 1 = 시작 → 휴대폰이 넘긴 때, 장면 2 = 휴대폰 → PC가 넘긴 때(시험 실행기 시계, 누름 지연 포함)
+  row.scene1 = Math.round((r.scenes[0].sec - (m1 - t0) / 1000) * 10) / 10;
+  row.scene2 = Math.round((r.scenes[1].sec - (m2 - m1) / 1000) * 10) / 10;
+  note(Object.assign({ case: "수업 중에 연 휴대폰 +30초" }, row, rec));
+  expect(Math.abs(row.phoneAfterSync), "맞춘 뒤 휴대폰").toBeLessThanOrEqual(1);
+  expect(Math.abs(row.clockErrMs), "맞춘 시계 오차(ms)").toBeLessThanOrEqual(1000);
+  expect(Math.abs(row.phoneLater)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.scene1), "휴대폰이 넘긴 장면(1)").toBeLessThanOrEqual(1.5);
+  expect(Math.abs(row.scene2), "그다음 장면(2)").toBeLessThanOrEqual(1.5);
+  recOk(rec);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 24 · 수업 중에 연 휴대폰(시계 −20초): 맞춘 뒤 화면 ±1초, 넘긴 장면 기록이 맞아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(25000);
+  const c = await lateJoin(browser, errors, pc, -20000);
+  await synced(c);
+  await c.page.waitForTimeout(1500);
+  const row = { phoneAfterSync: await off(c.page, t0), clockErrMs: await syncErr(c.page, -20000) };
+  const m1 = Date.now();
+  await nextBtn(c.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(3000);
+  const rs = await endClass(pc, t0);
+  const r = await lastRecord(pc.page), rec = recCheck(r, rs);
+  row.scene1 = Math.round((r.scenes[0].sec - (m1 - t0) / 1000) * 10) / 10;
+  note(Object.assign({ case: "수업 중에 연 휴대폰 −20초" }, row, rec));
+  expect(Math.abs(row.phoneAfterSync)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.clockErrMs), "맞춘 시계 오차(ms)").toBeLessThanOrEqual(1000);
+  expect(Math.abs(row.scene1), "휴대폰이 넘긴 장면(1)").toBeLessThanOrEqual(1.5);
+  recOk(rec);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 25 · PC가 끊긴 채 수업 중에 휴대폰을 열면: 맞추기 전 넘기기는 막히고, 6초 · 한 번 더 기다린 뒤 ‘다시 시도’, PC가 돌아오면 맞추고 넘겨요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(3000);
+  const curBefore = (await readDoc(pc.page, "sessions/s" + pc.pin, { started: true })).cur;
+  await pc.ctx.setOffline(true);
+  const a = await lateJoin(browser, errors, pc, 30000);
+  await expect(syncNote(a.page)).toContainText("수업 시간 맞추는 중");
+  // 맞추기 전: 넘기기 · 신호가 막혀요(서버에도 가지 않아요). 흐리게 막은 단추를 스크립트로 눌러 앱의 막기 자체를 봐요
+  await nextBtn(a.page).evaluate((el) => el.click());
+  await a.page.locator(".thumb-nav .sig.s-yellow").evaluate((el) => el.click());
+  await a.page.waitForTimeout(1500);
+  const s1 = await readDoc(a.page, "sessions/s" + pc.pin, { started: true });
+  expect(s1.cur, "맞추기 전 넘기기는 막혀요").toBe(curBefore);
+  expect((s1.reactions || []).length, "맞추기 전 신호도 막혀요").toBe(0);
+  // 6초 + 한 번 더(6초) 뒤: 오류와 ‘다시 시도’, 성공했다고 하지 않아요
+  await expect(syncNote(a.page)).toContainText("맞추지 못했어요", { timeout: 20000 });
+  await expect(a.page.locator('.thumb-nav [data-act="clk-retry"]')).toBeVisible();
+  await expect(a.page.locator(".thumb-nav.frozen")).toHaveCount(1);
+  expect((await readDoc(a.page, "sessions/s" + pc.pin, { started: true })).cur).toBe(curBefore);
+  // PC가 돌아오고 다시 시도하면 맞추고, 넘길 수 있어요
+  await pc.ctx.setOffline(false);
+  await pc.page.waitForTimeout(3000);
+  await a.page.locator('.thumb-nav [data-act="clk-retry"]').click();
+  await synced(a);
+  await a.page.waitForTimeout(1500);
+  const row = { phoneAfterRetry: await off(a.page, t0) };
+  await nextBtn(a.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  note(Object.assign({ case: "PC 끊김 중 접속 · 다시 시도" }, row));
+  expect(Math.abs(row.phoneAfterRetry)).toBeLessThanOrEqual(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 26 · 휴대폰 두 대(+30초 · −20초)가 수업 중에 동시에 접속: 요청이 겹쳐도 둘 다 자기 답으로 맞추고 넘길 수 있어요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(25000);
+  const [a, c] = await Promise.all([lateJoin(browser, errors, pc, 30000), lateJoin(browser, errors, pc, -20000)]);
+  const s0 = Date.now();
+  await Promise.all([synced(a, 30000), synced(c, 30000)]);
+  const row = { syncSec: Math.round((Date.now() - s0) / 100) / 10 };
+  await pc.page.waitForTimeout(1500);
+  row.a = await off(a.page, t0); row.c = await off(c.page, t0);
+  row.aErrMs = await syncErr(a.page, 30000); row.cErrMs = await syncErr(c.page, -20000);
+  await nextBtn(a.page).click();
+  await expect(curLabel(c.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  // 수업처럼 장면 사이에 잠시 머물러요(두 휴대폰의 맞춘 시계는 각각 수백 ms 안에서 달라, 0.5초 안에 번갈아 넘기면 장면이 −0.1초처럼 될 수 있어요: 아래 오차로 따로 재요)
+  await c.page.waitForTimeout(2000);
+  await nextBtn(c.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[2], { timeout: 20000 });
+  const rs = await endClass(pc, t0);
+  const rec = recCheck(await lastRecord(pc.page), rs);
+  note(Object.assign({ case: "휴대폰 두 대 동시 접속" }, row, rec));
+  expect(Math.abs(row.a)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.c)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.aErrMs), "A 시계 오차(ms)").toBeLessThanOrEqual(1000);
+  expect(Math.abs(row.cErrMs), "C 시계 오차(ms)").toBeLessThanOrEqual(1000);
+  recOk(rec);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 27 · 맞춘 휴대폰이 끊겼다 이어져도 다시 묻지 않고(쓰기 0), 새로고침하면 한 번만 다시 맞춰요(쓰기 1)", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const t0 = await startClass(pc, errors);
+  await pc.page.waitForTimeout(3000);
+  const a = await lateJoin(browser, errors, pc, 30000);
+  await synced(a);
+  const w0 = await writes(a.page);
+  await a.ctx.setOffline(true);
+  await a.page.waitForTimeout(4000);
+  await a.ctx.setOffline(false);
+  await a.page.waitForTimeout(4000);
+  await expect(syncNote(a.page)).toHaveCount(0);
+  const row = { writesAfterReconnect: (await writes(a.page)) - w0, afterReconnect: await off(a.page, t0) };
+  await a.page.reload();
+  await expect(curLabel(a.page)).toBeVisible({ timeout: 20000 });
+  await synced(a);
+  await a.page.waitForTimeout(3000);
+  row.writesAfterReload = await writes(a.page);
+  row.afterReload = await off(a.page, t0);
+  note(Object.assign({ case: "다시 연결 · 새로고침" }, row));
+  expect(row.writesAfterReconnect, "다시 이어져도 묻지 않아요").toBe(0);
+  expect(row.writesAfterReload, "새로고침 뒤 한 번만").toBe(1);
+  expect(Math.abs(row.afterReconnect)).toBeLessThanOrEqual(1);
+  expect(Math.abs(row.afterReload)).toBeLessThanOrEqual(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 28 · 수업 전부터 대기 화면에 있던 휴대폰: 시작하자마자 넘길 수 있고 ‘맞추는 중’도, 수업 중 묻기(쓰기)도 없어요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const ph = await phoneOf(browser, errors, pc, 30000);
+  await ph.page.waitForTimeout(1500);
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  const w0 = await writes(ph.page);
+  await expect(syncNote(ph.page)).toHaveCount(0);
+  await nextBtn(ph.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(2000);
+  const row = { extraWrites: (await writes(ph.page)) - w0 - 1, phone: await off(ph.page, t0) };
+  note(Object.assign({ case: "대기 화면에서 온 휴대폰" }, row));
+  expect(row.extraWrites, "넘기기 한 번 말고는 쓰지 않아요").toBe(0);
+  expect(Math.abs(row.phone)).toBeLessThanOrEqual(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 29 · PIN 휴대폰(시계 +30초)이 수업 중 새로고침: 다시 맞춘 뒤 넘기기가 ‘늦은 명령’으로 거절되지 않아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  await toFlow(pc.page);
+  await pc.page.locator('.sbar [data-act="conn"]').click();
+  await expect(pc.page.locator(".conn-pop .pair-state")).toContainText("연결 기다리는 중");
+  const ph = await device(browser, PHONE, errors);
+  await skewable(ph.ctx, 30000);
+  await ph.page.goto(pc.url);
+  await ph.page.getByRole("button", { name: /PIN 4자리로 연결/ }).click();
+  await expect(pc.page.locator(".conn-pop .ask-row")).toHaveCount(1);
+  await Promise.all([ph.page.waitForEvent("load"), pc.page.locator('.conn-pop .ask-row [data-act="pair-allow"]').click()]);
+  await pc.page.locator('.conn-pop [data-act="conn"]').click();
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(3000);
+  await ph.page.reload();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await synced(ph);
+  await ph.page.waitForTimeout(1500);
+  const row = { phone: await off(ph.page, t0), clockErrMs: await syncErr(ph.page, 30000) };
+  await nextBtn(ph.page).click();
+  await pc.page.waitForTimeout(5500);
+  row.pcLabel = await curLabel(pc.page).innerText();
+  note(Object.assign({ case: "PIN 휴대폰 새로고침" }, row));
+  expect(Math.abs(row.phone)).toBeLessThanOrEqual(1);
+  expect(row.pcLabel, "PIN 휴대폰의 넘기기가 받아들여져요").toBe(LABELS[1]);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 30 · 비용: 수업 중에 연 휴대폰 한 대를 맞추는 데 쓰기는 휴대폰 1 · PC 1, 이미 맞춘 휴대폰은 0", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const b = await phoneOf(browser, errors, pc);
+  await startClass(pc, errors);
+  await expect(curLabel(b.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(3000);
+  const pc0 = await writes(pc.page), b0 = await writes(b.page);
+  const a = await lateJoin(browser, errors, pc, 30000);
+  await synced(a);
+  await pc.page.waitForTimeout(2000);
+  const row = { phoneWrites: await writes(a.page), pcWrites: (await writes(pc.page)) - pc0, otherPhoneWrites: (await writes(b.page)) - b0 };
+  note(Object.assign({ case: "맞추기 비용(쓰기)" }, row));
+  expect(row.phoneWrites, "새 휴대폰: 묻기 1").toBe(1);
+  expect(row.pcWrites, "PC: 답 1").toBe(1);
+  expect(row.otherPhoneWrites, "이미 맞춘 휴대폰: 0").toBe(0);
   expect(real(errors)).toEqual([]);
 });
