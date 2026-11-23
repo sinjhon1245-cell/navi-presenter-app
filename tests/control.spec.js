@@ -1369,3 +1369,187 @@ test("공용 PC 로그아웃: 수업 중에는 확인 줄(계속 수업 · 기�
   await expect.poll(async () => (await localRecords(pc.page)).length).toBe(2);
   expect(real(errors)).toEqual([]);
 });
+
+// ---------- 끝난 수업과 새로 고른 수업(2026-11-22) ----------
+// 수업이 끝난 뒤 교사 PC 창을 새로 열면(새로고침 · 다음 날) 그 창은 아직 수업을 맡지 않았어요. 거기서 다른 수업을 고르면 계정의 끝난 세션도
+// 함께 비워요(수업 고르기 = 교사의 행동이라 맡아도 돼요). 예전에는 그 창의 화면만 비워서, 휴대폰이 앞 수업의 끝 화면에 새 수업 제목 · 장면을 섞어 보여 줬어요
+const acctRecords = async (uid) => ((await fetch(docUrl("teachers/" + uid + "/records") + "?pageSize=50", { headers: { Authorization: "Bearer owner" } }).then((r) => r.json())).documents || []);
+const pickExample = async (page, id) => {
+  await page.getByRole("tab", { name: "예시 수업" }).click();
+  await page.locator('.lcard[data-v="' + id + '"]').click();
+  await page.locator('.lib-sum [data-act="lib-open"], .lib-sum [data-act="lib-close"]').first().click();
+};
+async function endedThenNewWindow(browser, errors) {
+  const who = email("teacher");
+  const pc = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, pc.url, who);
+  pc.pin = pinOf(pc.url); pc.uid = await uidOf(pc);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0]);
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await finishLesson(pc.page);
+  await expect(pc.page.locator(".memo-sheet")).toContainText("계정에 저장했어요", { timeout: 20000 });
+  await expect(ph.page.locator(".memo-sheet")).toBeVisible();
+  const ended = await sessionOf(pc);
+  expect(field(ended, "ended")).toBe(true);
+  expect(field(ended, "memoId")).toBeTruthy();
+  // 교사 PC 창을 닫고 새로 열어요: 이 창은 아직 수업을 맡지 않았어요
+  await pc.stage.close().catch(() => {});
+  await pc.page.close();
+  const page = await pc.ctx.newPage();
+  watch(page, errors);
+  await page.goto("/");
+  await pcLinked(page);
+  return { pc: Object.assign(pc, { page }), ph, ended };
+}
+
+test("수업이 끝난 뒤 새 PC 창에서 다른 수업을 고르면: 계정의 끝난 세션을 비워 휴대폰은 새 수업을 기다려요(앞 수업 끝 화면에 새 제목이 섞이지 않음). 기록은 한 건 그대로", async ({ browser }) => {
+  const errors = [];
+  const { pc, ph, ended } = await endedThenNewWindow(browser, errors);
+  const other = DATA.lessons.find((L) => L.id === "ex-m3-fraction");
+  await pickExample(pc.page, other.id);
+  await expect.poll(async () => field((await classDocs(pc.uid, pc.pin))["lessons/deck"], "lessonId")).toBe(other.id);
+  // 계정의 세션: 비워졌고(끝난 앞 수업이 남지 않음), 새로 시작하지도 않았어요
+  await expect.poll(async () => field(await sessionOf(pc), "ended"), { timeout: 15000 }).toBe(false);
+  const now = await sessionOf(pc);
+  expect(field(now, "started"), "고르기만 했는데 수업이 시작됐어요").toBe(false);
+  expect(field(now, "memoId") || null).toBe(null);
+  // 휴대폰: 앞 수업의 끝 화면이 아니라 새 수업을 기다리는 화면
+  await expect(ph.page.locator(".memo-sheet")).toHaveCount(0, { timeout: 15000 });
+  await expect(ph.page.locator(".ph-hero h1")).toHaveText(other.title);
+  await expect(ph.page.locator("body")).not.toContainText("못 했어요");
+  // 앞 수업의 기록은 그대로 한 건(지워지거나 늘지 않음)
+  expect((await localRecords(pc.page)).length).toBe(1);
+  const acct = await acctRecords(pc.uid);
+  expect(acct.length).toBe(1);
+  expect(acct[0].name.endsWith("/r-" + Number(field(ended, "t0")).toString(36))).toBe(true);
+  expect(real(errors)).toEqual([]);
+});
+
+test("수업이 끝난 뒤 새 PC 창을 열기만 하면: 계정의 끝난 세션 · 수업 · 허브를 쓰지 않아요(휴대폰은 그 수업의 끝 화면 그대로)", async ({ browser }) => {
+  const errors = [];
+  const { pc, ph, ended } = await endedThenNewWindow(browser, errors);
+  const before = await classDocs(pc.uid, pc.pin);
+  await pc.page.waitForTimeout(2500);
+  const after = await classDocs(pc.uid, pc.pin);
+  expect(after["sessions/s" + pc.pin].updateTime, "세션을 다시 썼어요").toBe(before["sessions/s" + pc.pin].updateTime);
+  expect(after["lessons/deck"].updateTime, "수업을 다시 썼어요").toBe(before["lessons/deck"].updateTime);
+  expect(field(after["sessions/s" + pc.pin], "memoId")).toBe(field(ended, "memoId"));
+  await expect(ph.page.locator(".memo-sheet")).toBeVisible();
+  expect(real(errors)).toEqual([]);
+});
+
+test("다른 PC가 수업 중일 때 이 PC에서 다른 수업을 골라도: 그 수업의 세션은 그대로(초기화되지 않음), 휴대폰도 그 수업을 따라가요", async ({ browser }) => {
+  const errors = [], who = email("teacher");
+  const a = await teacherStarts(browser, errors, who);
+  const ph = await phoneJoins(browser, errors, a.url, who);
+  a.pin = pinOf(a.url); a.uid = await uidOf(a);
+  await nextBtn(a.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  const live = await sessionOf(a);
+  const b = await otherPc(browser, errors, who);
+  await pickExample(b.page, "ex-m3-fraction");
+  await b.page.waitForTimeout(2500);
+  const now = await sessionOf(a);
+  expect(field(now, "started")).toBe(true);
+  expect(field(now, "ended")).toBe(false);
+  expect(field(now, "t0")).toBe(field(live, "t0"));
+  expect(now.updateTime, "다른 PC가 수업 중인 세션을 썼어요").toBe(live.updateTime);
+  expect(field((await classDocs(a.uid, a.pin))["lessons/deck"], "lessonId")).not.toBe("ex-m3-fraction");
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await nextBtn(a.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[2]);
+  expect(real(errors)).toEqual([]);
+});
+
+// ---------- 경계: 계정 기록이 아직 서버에 없는데(memoId만 있음) 새 PC 창이 끝난 세션을 비우면(2026-11-23) ----------
+// 기록의 원본은 끝낸 PC 브라우저의 기록(navi-local-{교사}, srvAt 없음)이고 세션 문서에는 기록이 없어요. 세션을 비워도 그 기록은 그대로이고,
+// 끝낸 PC(또는 같은 브라우저의 새 창)가 다시 열리면 계정에 한 건만 올라가요. 다른 기기는 그 기록을 만들 수 없어요(그 PC에만 있음)
+// 이 PC의 계정 기록 쓰기만 서버에 닿지 않게 붙잡아요(‘보내는 중’에 머묾). 수업 세션 · 수업 · 허브 쓰기는 그대로예요
+const holdRecordWrites = (page) => page.evaluate(async () => {
+  const db = await window.claude.use("db"), doc = db.doc.bind(db);
+  db.doc = (p) => { const r = doc(p); if (/^records\//.test(p)) { r.set = () => new Promise(() => {}); r.update = () => new Promise(() => {}); } return r; };
+});
+async function endedWithoutAcctRecord(browser, errors) {
+  const who = email("teacher");
+  const pc = await teacherStarts(browser, errors, who);
+  pc.pin = pinOf(pc.url); pc.uid = await uidOf(pc);
+  await holdRecordWrites(pc.page);
+  await nextBtn(pc.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1]);
+  await pc.page.waitForTimeout(1200);
+  await finishLesson(pc.page);
+  // 서버의 세션은 끝났고 memoId가 있어요. 계정 기록은 아직 없어요. 이 PC 브라우저에는 기록이 있어요(아직 계정에 안 감)
+  await expect.poll(async () => field(await sessionOf(pc), "memoId") || "", { timeout: 15000 }).not.toBe("");
+  const ended = await sessionOf(pc);
+  expect(field(ended, "ended")).toBe(true);
+  await expect.poll(async () => (await localRecords(pc.page)).length).toBe(1);
+  const [rec] = await localRecords(pc.page);
+  expect(rec.srvAt || null, "계정에 간 것으로 적혀 있어요").toBe(null);
+  expect(rec.id).toBe(field(ended, "memoId"));
+  await pc.page.waitForTimeout(1500);
+  expect((await acctRecords(pc.uid)).length, "계정 기록이 벌써 있어요").toBe(0);
+  return { pc, who, ended, rec };
+}
+const acctRecId = (ended) => "r-" + Number(field(ended, "t0")).toString(36);
+async function acctRecordIs(uid, ended, rec) {
+  await expect.poll(async () => (await acctRecords(uid)).length, { timeout: 30000 }).toBe(1);
+  const [d] = await acctRecords(uid);
+  expect(d.name.endsWith("/" + acctRecId(ended))).toBe(true);
+  expect(Number(field(d, "startAt"))).toBe(Number(field(ended, "t0")));
+  expect(field(d, "title")).toBe(rec.title);
+  const scenes = d.fields.scenes.arrayValue.values || [];
+  expect(scenes.length).toBe((rec.scenes || []).length);
+}
+
+test("경계 · 다른 기기: 계정 기록이 아직 없는 끝난 수업. 끝낸 PC가 열려 있으면 새 PC는 세션을 못 비우고, 닫힌 뒤 비워도 그 PC 브라우저의 기록은 그대로 → 끝낸 PC를 다시 열면 계정에 한 건(같은 id · 같은 내용, 중복 없음)", async ({ browser }) => {
+  const errors = [];
+  const { pc: a, who, ended, rec } = await endedWithoutAcctRecord(browser, errors);
+  const other = DATA.lessons.find((L) => L.id === "ex-m3-fraction");
+  // 끝낸 PC가 아직 열려 있어요(수업을 맡고 있음): 다른 기기에서 수업을 골라도 세션은 그대로
+  const b = await otherPc(browser, errors, who);
+  await pickExample(b.page, other.id);
+  await b.page.waitForTimeout(2500);
+  const kept = await sessionOf(a);
+  expect(kept.updateTime, "끝낸 PC가 맡고 있는데 세션을 썼어요").toBe(ended.updateTime);
+  // 끝낸 PC를 닫아요(계정 기록은 끝내 보내지 못한 채): 이제 다른 기기에서 수업을 고르면 끝난 세션을 비워요
+  await a.stage.close().catch(() => {});
+  await a.page.close();
+  await b.page.waitForTimeout(1500);
+  await pickExample(b.page, "ex-s5-ecosystem");
+  await expect.poll(async () => field(await sessionOf(a), "ended"), { timeout: 15000 }).toBe(false);
+  expect(field(await sessionOf(a), "memoId") || null).toBe(null);
+  // 기록은 아직 계정에 없고, 다른 기기에는 그 기록이 없어요(만들 수도 없어요)
+  expect((await acctRecords(a.uid)).length).toBe(0);
+  expect(await localRecords(b.page)).toEqual([]);
+  // 끝낸 PC를 다시 열면 그 브라우저의 기록을 계정에 올려요: 한 건, 같은 id, 같은 내용
+  const again = await a.ctx.newPage();
+  watch(again, errors);
+  await again.goto("/");
+  await pcLinked(again);
+  await acctRecordIs(a.uid, ended, rec);
+  await expect.poll(async () => !!(await localRecords(again))[0].srvAt, { timeout: 15000 }).toBe(true);
+  await again.waitForTimeout(2500);
+  expect((await acctRecords(a.uid)).length, "같은 기록이 두 번 올라갔어요").toBe(1);
+  // 다시 연 PC는 새 PC가 비운 세션을 앞 수업으로 되돌리지 않아요
+  expect(field(await sessionOf(a), "ended")).toBe(false);
+  expect(real(errors)).toEqual([]);
+});
+
+test("경계 · 같은 브라우저의 새 창: 계정 기록이 아직 없는 끝난 수업을 새 창에서 비워도, 그 창이 이 브라우저의 기록을 계정에 올려요(한 건, 중복 없음)", async ({ browser }) => {
+  const errors = [];
+  const { pc: a, ended, rec } = await endedWithoutAcctRecord(browser, errors);
+  await a.stage.close().catch(() => {});
+  await a.page.close();
+  const page = await a.ctx.newPage();
+  watch(page, errors);
+  await page.goto("/");
+  await pcLinked(page);
+  await pickExample(page, "ex-m3-fraction");
+  await expect.poll(async () => field(await sessionOf(a), "ended"), { timeout: 15000 }).toBe(false);
+  await acctRecordIs(a.uid, ended, rec);
+  expect((await localRecords(page)).length).toBe(1);
+  await page.waitForTimeout(2500);
+  expect((await acctRecords(a.uid)).length).toBe(1);
+  expect(real(errors)).toEqual([]);
+});
