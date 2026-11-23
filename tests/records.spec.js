@@ -59,8 +59,9 @@ test("수업을 끝내면 기록 1건: 시작 · 끝 시각, 장면별 시간과
   expect(r.scenes[0].sec).toBeGreaterThanOrEqual(2);
   expect(r.scenes[0].sec).toBeLessThanOrEqual(5);
   expect(r.scenes[1].sec).toBeGreaterThanOrEqual(1);
-  // 수업 전체 시간 = 장면별 시간의 합(지나간 장면만)
-  expect(r.totalSec).toBe(r.scenes.reduce((a, x) => a + x.sec, 0));
+  // 수업 전체 시간 = 장면별 시간의 합(지나간 장면만). 기록은 0.1초 단위라(2026-11-23, docs/CLASS-CLOCK.md R2) 0.1초로 세어 정확히 같아요
+  expect(Math.round(r.totalSec * 10)).toBe(r.scenes.reduce((a, x) => a + Math.round(x.sec * 10), 0));
+  expect(r.scenes.every((x) => Math.abs(x.sec * 10 - Math.round(x.sec * 10)) < 1e-9)).toBe(true);
   expect(r.questions).toEqual([{ sid: L.pages[1].id, label: L.pages[1].label, text: "수증기가 보이는지 묻는 질문" }]);
   expect(r.again.join(" ")).toContain(L.pages[1].label);
   // 학생 정보 칸은 없어요

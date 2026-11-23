@@ -522,3 +522,60 @@ test("시계 15 · 새 앱 + 지금 운영 규칙(by를 모름, 2026-11-15 배�
   expect(Math.abs(row.pc)).toBeLessThanOrEqual(1);
   expect(real(errors).filter((e) => !/permission|insufficient/i.test(e))).toEqual([]);
 });
+
+test("시계 16 · PC가 끊긴 채 끝냄 → 그 사이 휴대폰이 누른 신호: 이어진 뒤 서버의 마지막 수업으로 같은 기록을 다시 저장해요(기록 한 건, 신호 포함, 시간 그대로)", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const ph = await phoneOf(browser, errors, pc);
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(2000);
+  await pc.ctx.setOffline(true);
+  // 휴대폰은 연결된 채 노랑을 눌러요(PC는 아직 몰라요)
+  await ph.page.locator(".thumb-nav .sig.s-yellow").click();
+  await ph.page.waitForTimeout(2000);
+  const rs = await endClass(pc, t0);
+  const first = await lastRecord(pc.page);
+  const yellow = (r) => (r.events || []).filter((e) => e.type === "yellow").length;
+  const row = { yellowAtEnd: yellow(first) };
+  await pc.ctx.setOffline(false);
+  await expect.poll(async () => yellow(await lastRecord(pc.page)), { timeout: 30000 }).toBe(1);
+  const r = await lastRecord(pc.page);
+  const rec = recCheck(r, rs);
+  row.yellowAfter = yellow(r); row.sameId = r.id === first.id;
+  note(Object.assign({ case: "끊긴 채 끝냄 · 휴대폰 신호" }, row, rec));
+  expect(row.sameId, "같은 기록을 다시 저장").toBe(true);
+  recOk(rec);
+  expect((await localRecords(pc.page)).length).toBe(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 17 · 끊긴 PC가 옛 장면에서 화면을 가림 → 그 사이 휴대폰이 넘김: 가림은 반영하지 않고 알려요, [다시 띄우기]로 지금 장면에 다시 가려요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const ph = await phoneOf(browser, errors, pc);
+  await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(1500);
+  await pc.ctx.setOffline(true);
+  await nextBtn(ph.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await ph.page.waitForTimeout(1500);
+  // PC는 아직 첫 장면이라고 알아요: 화면 가리기(B)
+  await pc.page.keyboard.press("b");
+  await expect(pc.stage.locator(".blankout.black")).toBeVisible();
+  await pc.page.waitForTimeout(2000);
+  await pc.ctx.setOffline(false);
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 30000 });
+  const held = pc.page.locator(".clk-held");
+  await expect(held).toContainText("띄운 것은 반영하지 않았어요", { timeout: 15000 });
+  await expect(pc.stage.locator(".blankout")).toHaveCount(0);
+  await held.getByRole("button", { name: "다시 띄우기" }).click();
+  await expect(pc.stage.locator(".blankout.black")).toBeVisible();
+  await expect(held).toHaveCount(0);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  note({ case: "끊긴 PC의 화면 가림", notice: true, again: true });
+  expect(real(errors)).toEqual([]);
+});

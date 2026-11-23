@@ -420,7 +420,7 @@ test("끝난 뒤 조작: 양쪽에서 동시에 끝내도 기록은 1건, 끝난
   expect(errors.filter((e) => !/net::/.test(e))).toEqual([]);
 });
 
-test("끊긴 동안 양쪽에서 바꾸기: 교사 PC가 끊긴 사이 휴대폰과 PC가 각각 넘기면, 다시 이어진 뒤 교사 PC 기준으로 세 화면이 같아져요", async ({ browser }) => {
+test("끊긴 동안 양쪽에서 바꾸기: 교사 PC가 끊긴 사이 휴대폰과 PC가 각각 넘기면, 다시 이어진 뒤 휴대폰이 넘긴 장면으로 세 화면이 같아지고, 교사 PC가 반영하지 않은 것을 알려 그 장면으로 되돌릴 수 있어요", async ({ browser }) => {
   const errors = [], who = email("teacher");
   const pc = await teacherStarts(browser, errors, who);
   const ph = await phoneJoins(browser, errors, pc.url, who);
@@ -435,8 +435,13 @@ test("끊긴 동안 양쪽에서 바꾸기: 교사 PC가 끊긴 사이 휴대폰
   await pc.page.keyboard.press("PageDown");
   await expect(stageLabel(pc.stage)).toHaveText(LABELS[1]);
   await pc.ctx.setOffline(false);
-  // 교사 PC가 보내지 못했던 것이 나중에 서버에 닿아요 → 수업 화면(TV)에 보이던 장면으로 셋이 모여요
+  // 2026-11-21 교사 결정(docs/CLASS-CLOCK.md 2-4): 끊긴 PC가 옛 장면에서 넘긴 것은 서버의 더 새 진행(휴대폰이 넘긴 곳)을 덮지 않아요.
+  // 휴대폰이 넘긴 장면으로 셋이 모이고, 교사 PC는 반영하지 않은 것을 알려요. [그 장면으로 가기]면 수업 화면(TV)에 보이던 장면으로 셋이 모여요
+  await expect.poll(() => same3(pc, ph), { timeout: 30000 }).toBe(LABELS[2]);
+  await expect(pc.page.locator(".clk-held")).toContainText("반영하지 않았어요");
+  await pc.page.locator('.clk-held [data-act="clk-go"]').click();
   await expect.poll(() => same3(pc, ph), { timeout: 30000 }).toBe(LABELS[1]);
+  await expect(pc.page.locator(".clk-held")).toHaveCount(0);
   expect(errors.filter((e) => !/net::/.test(e))).toEqual([]);
 });
 

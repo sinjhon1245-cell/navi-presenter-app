@@ -84,8 +84,16 @@ service cloud.firestore {
     // 세션 문서에 올 수 있는 칸. 개수 상한은 앱(80 · 40 · 80)보다 넉넉하게, 지나치게 커지는 것만 막는다
     // vid(2026-11-12, docs/VIDEO.md 1-1): 이번 장면 방문에서 장면 영상을 틀었거나 틀어 달라고 했다는 표시({ k: 's:장면 id', at }).
     // 영상 장면의 ‘다음’ 두 단계(첫 다음 = 재생, 둘째 = 다음 장면)를 휴대폰도 알게 해요. 장면이 바뀌면 null
+    // by(2026-11-23, docs/CLASS-CLOCK.md): 수업을 맡은 PC 창이 이 쓰기를 했다는 표시({ pc: 창 id, at }). 따라가는 기기가 수업 시계를 맞출 때
+    // by.at = at이고 by.pc = lessons/hub.pc인 쓰기만 표본으로 써요. 모양만 봐요(없거나 null이면 예전 앱과 같아요)
+    function validBy(d) {
+      return !('by' in d) || d.by == null
+        || (d.by is map && d.by.keys().hasOnly(['pc', 'at']) && d.by.keys().hasAll(['pc', 'at'])
+          && d.by.pc is string && d.by.pc.size() <= 64 && d.by.at is number);
+    }
     function validSession(d) {
-      return d.keys().hasOnly(['v', 'started', 'ended', 'cur', 't0', 'enteredAt', 'log', 'reactions', 'qs', 'used', 'tv', 'blank', 'tool', 'memoId', 'at', 'run', 'vid'])
+      return d.keys().hasOnly(['v', 'started', 'ended', 'cur', 't0', 'enteredAt', 'log', 'reactions', 'qs', 'used', 'tv', 'blank', 'tool', 'memoId', 'at', 'run', 'vid', 'by'])
+        && validBy(d)
         && (!('vid' in d) || d.vid == null || (d.vid is map && d.vid.keys().hasOnly(['k', 'at']) && d.vid.k is string && d.vid.k.size() <= 120 && d.vid.at is number))
         && optString(d, 'run', 64)
         && optList(d, 'log', 300)
