@@ -864,6 +864,7 @@ button.rd:hover { background: var(--hover); color: var(--tx); }
 /* after moving away from a playing video: the way back for 5 seconds, over the dock (the layout does not move) */
 .undo-move { position: fixed; left: 24px; bottom: 176px; z-index: 40; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(52vw - 24px)); flex-wrap: wrap; padding: 10px 12px 10px 16px; border-radius: var(--r-lg); background: var(--surface); color: var(--tx); box-shadow: var(--lift), 0 0 0 1px var(--line); font-size: var(--fs-sm); }
 .undo-move .btn { flex-shrink: 0; }
+.undo-move.clk-held { box-shadow: var(--lift), 0 0 0 1px var(--warn); }
 .slide.media.vid { box-shadow: 0 0 0 1px rgba(255, 255, 255, .14); }
 /* a video that ended or cannot play: its frame is covered (YouTube's end screen suggests other videos) */
 .vid-cover { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.4cqw; padding: 4cqw; text-align: center; background: #0E1116; color: #FFFFFF; }
@@ -1029,6 +1030,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
 .thumb-nav .in { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
 /* linked phone without the server: steering waits until it is back */
 .thumb-nav.frozen .sigs, .thumb-nav.frozen .nav-row { opacity: .45; pointer-events: none; }
+.thumb-nav .clk-sync.wait { font-size: var(--fs-sm); color: var(--tx-2); text-align: center; padding: 6px 0; }
 .thumb-nav .sigs .sig { min-height: 58px; flex-direction: column; gap: 2px; font-size: var(--fs-sm); }
 .nav-row { display: grid; grid-template-columns: 64px 56px 56px minmax(0, 1fr); gap: 6px; }
 .nav-row .btn { min-height: 72px; border-radius: var(--r-xl); flex-direction: column; gap: 2px; line-height: 1.2; padding: 0 6px; font-size: var(--fs-sm); background: var(--bg-sunk); border-color: transparent; }
@@ -1582,6 +1584,108 @@ button.pchip { cursor: pointer; font-family: inherit; }
   const detState = {}, aiOut = {}, said = {}, pageBlobs = {};
 
   const now = () => Date.now() - clockOff;
+  // ---------- the class clock (2026-11-23, docs/CLASS-CLOCK.md) ----------
+  // The PC window that holds the class is the clock: it never sets its clock from another device. A device that follows (a phone,
+  // a class screen on its own device, a PC that does not hold the class) sets clockOff only from the holder's own writes: by.at = at,
+  // by.pc = lessons/hub.pc, the same class and run, confirmed by the server, not the first one after a cut. Each gives
+  // Date.now() − at = the clock difference + how long it took to come, so the smallest of the last five minutes is the best one.
+  // A phone waiting for the class also takes its ping/pong: (sent + received) / 2 − pong.at
+  const CLK_WIN = 300000, CLK_MAX = 120000, CLK_JUMP = 1500, CLK_SURE = 2000;
+  // clkSkip: the next server-confirmed class is the first after a cut (or a page load, a wake-up), so it may be old: not a sample.
+  // clkBase: the site's clock − this window's class clock when the class started (the holder checks a jump forward against it).
+  // byOff: the t0 of a class whose writes go without by (rules that do not know it yet). clkHeld: a PC write the class went past while it was cut off
+  let clkSamples = [], clkSkip = true, clkSeenAt = null, clkT0 = null, clkPc = "", clkBase = null, clkWarn = false, clkHeld = null, byOff = null;
+  let clkWall = Date.now(), clkMono = performance.now(), clkBusy = false, clkTried = -1e9, clkVerifying = false;
+  // The first clock of a phone that opens (or reloads) during a class (2026-11-23, docs/CLASS-CLOCK.md 2-6). Its first snapshot may be old,
+  // so it has no sample for this class yet: it asks the PC once (the waiting screen's ping → pong, with its own request id, so another
+  // phone's answer never sets its clock) and does not steer until that answer, or a sample of the PC's own write, comes.
+  // clkSyncT0: the class this page has a sample for. clkAsk.state: "" · wait (asked) · fail (no answer after two tries) · skew (more than two minutes off)
+  let clkSyncT0 = null, clkAsk = { state: "", id: "", prev: "", at: 0, tries: 0, bumps: 0 };
+  const clkLead = () => isHub() && holds();
+  function clkTake(v) {
+    if (!(Math.abs(v) < CLK_MAX) || clkLead()) return false;
+    const t = performance.now();
+    clkSamples = clkSamples.filter((x) => t - x.t < CLK_WIN).concat([{ v, t }]);
+    clockOff = Math.round(Math.min.apply(null, clkSamples.map((x) => x.v)));
+    if (clkT0 !== null) clkSyncT0 = clkT0;
+    return true;
+  }
+  // read-only for the tests: this page's clock difference (ms) and whether it has a sample for the class on screen
+  try { Object.defineProperty(window, "__naviClock", { get: () => ({ off: clockOff, synced: clkSyncT0 !== null && clkSyncT0 === liveS.t0 }) }); } catch (e) {}
+  // a phone in a class it has no clock sample for yet (the class is not this page's to steer until it has one). Only where a PC holds the
+  // class through lessons/hub (it answers the question): rules without the hub (hubOff, or the hub confirmed missing) have nobody to ask,
+  // and the phone works as before. While the hub has not come yet, it waits
+  const clkWaiting = () => role === "remote" && !!db && !rehearsing && !hubOff && liveClass() && clkSyncT0 !== liveS.t0 && (!hubSeen || !!(hub && hub.pc));
+  function clkSend(tries) {
+    pingAt = Date.now(); pingId = rid();
+    clkAsk = { state: "wait", id: pingId, prev: hub && hub.ping ? hub.ping.id : "", at: pingAt, tries, bumps: clkAsk.bumps };
+    refH.update({ ping: { id: pingId, at: now() } }, { base: {} }).catch((e) => { if (e && e.code === "permission-denied") { hubOff = true; render(); } });
+    render();
+  }
+  // every second and after each snapshot: ask once; no answer in PONG_WAIT → once more; then say so and offer '다시 시도'
+  function clkSyncTick() {
+    if (!clkWaiting()) { if (clkAsk.state) clkAsk = { state: "", id: "", prev: "", at: 0, tries: 0, bumps: 0 }; return; }
+    if (!refH || !synced || document.visibilityState !== "visible") return;
+    if (!clkAsk.state) clkSend(1);
+    else if (clkAsk.state === "wait" && Date.now() - clkAsk.at > PONG_WAIT) { if (clkAsk.tries < 2) clkSend(clkAsk.tries + 1); else { clkAsk.state = "fail"; render(); } }
+  }
+  // hub.ping is one field: another phone's question can land on top of this one before the PC answers it. Then this phone asks again a
+  // moment later (random, so two phones do not keep landing on each other; at most three times, the tries above still count)
+  function clkBumped() {
+    if (clkAsk.state !== "wait" || !hub || !hub.ping || clkAsk.bumps >= 3) return;
+    const id = hub.ping.id;
+    if (!id || id === clkAsk.id || id === clkAsk.prev || (hub.pong && hub.pong.id === clkAsk.id)) return;
+    clkAsk.bumps++;
+    const mine = clkAsk.id;
+    setTimeout(() => { if (clkAsk.state === "wait" && clkAsk.id === mine && clkWaiting()) clkSend(clkAsk.tries); }, 300 + Math.random() * 900);
+  }
+  // every class snapshot on a device that follows (also before the class exists): a sample only if the holder wrote it just now.
+  // The first one the server confirms after a load or a cut is only what the class was, maybe long ago
+  function clkSee(d, snap) {
+    if (d && d.v !== V) d = null;
+    if (d && d.t0 !== clkT0) { clkT0 = d.t0; clkSamples = []; }
+    if (!confirmed(snap) || snap.metadata.hasPendingWrites) { if (snap.metadata && snap.metadata.fromCache) clkSkip = true; return; }
+    const at = d ? d.at : null, fresh = at !== clkSeenAt;
+    clkSeenAt = at;
+    if (clkSkip) { clkSkip = false; return; }
+    if (!d) return;
+    const by = d.by, pc = hubPc();
+    if (!fresh || !by || typeof d.at !== "number" || by.at !== d.at || !pc || by.pc !== pc || (d.run && hub && hub.run && d.run !== hub.run)) return;
+    clkTake(Date.now() - d.at);
+  }
+  // the site's clock (the Date of its answer, to the second)
+  const clkHead = () => fetch("/?clock=" + Date.now(), { method: "HEAD", cache: "no-store" })
+    .then((r) => { const t = Date.parse(r.headers.get("date") || ""); if (!isFinite(t)) throw new Error("no date"); return t + 500; });
+  function clkBaseline() {
+    if (clkBusy || !clkLead() || !S.started || S.ended || (clkBase && clkBase.t0 === S.t0) || performance.now() - clkTried < 10000) return;
+    const t0 = S.t0;
+    clkBusy = true; clkTried = performance.now();
+    clkHead().then((t) => { clkBusy = false; if (S.t0 === t0 && !(clkBase && clkBase.t0 === t0)) { clkBase = { t0, d: Math.round(t - now()) }; saveRun(); } }, () => { clkBusy = false; });
+  }
+  // this device's clock jumped (Date.now moved unlike the steady clock). Back: the class clock goes on as if nothing happened.
+  // Forward on the holder: the site's clock says whether time really passed (sleep: nothing to do) or the clock was changed (undo it).
+  // Not sure (no answer, neither): nothing is changed and the teacher screen says so. A device that follows only drops its samples
+  function clkCheck() {
+    const w = Date.now(), m = performance.now(), drift = Math.round((w - clkWall) - (m - clkMono));
+    clkWall = w; clkMono = m;
+    if (drift < -CLK_JUMP) { clockOff += drift; clkSamples = []; if (clkLead()) saveRun(); }
+    else if (drift > CLK_JUMP) {
+      if (!clkLead()) { clkSamples = []; return; }
+      if (!S.started || S.ended || rehearsing) return;
+      // until the site's clock answers, this window's writes go without a sample (by: null): a jumped time must not reach the phones
+      const t0 = S.t0;
+      clkVerifying = true;
+      clkHead().then((t) => {
+        clkVerifying = false;
+        if (S.t0 !== t0) return;
+        const dd = !clkBase || clkBase.t0 !== t0 ? null : (t - now()) - clkBase.d;
+        if (dd !== null && Math.abs(dd) <= CLK_SURE) clkWarn = false;
+        else if (dd !== null && Math.abs(dd + drift) <= CLK_SURE) { clockOff += drift; clkWarn = false; saveRun(); }
+        else clkWarn = true;
+        render();
+      }, () => { clkVerifying = false; if (S.t0 === t0) { clkWarn = true; render(); } });
+    }
+  }
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
   const fmt = (sec) => { sec = Math.max(0, Math.round(sec)); return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0"); };
   const safeUrl = (u) => /^(https?:\/\/|blob:)/i.test(String(u || "")) ? String(u) : "";
@@ -1686,17 +1790,25 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // so a PC that was closed by force, went to sleep or lost the network is not shown as ready. No asking during a class.
   // Cost: about 3 + 3 writes a minute while a phone waits (Spark gives 20,000 writes a day)
   const PING_MS = 20000, PONG_WAIT = 6000, PONG_OLD = 45000;
-  let pingAt = 0, pongAt = 0, pongSeen, pongFor = "";
+  let pingAt = 0, pongAt = 0, pongSeen, pongFor = "", pingId = "";
   function sendPing() {
     if (!refH || hubOff || !synced || !hub) return;
-    pingAt = Date.now();
-    refH.update({ ping: { id: rid(), at: now() } }, { base: {} }).catch((e) => { if (e && e.code === "permission-denied") { hubOff = true; render(); } });
+    pingAt = Date.now(); pingId = rid();
+    refH.update({ ping: { id: pingId, at: now() } }, { base: {} }).catch((e) => { if (e && e.code === "permission-denied") { hubOff = true; render(); } });
     setTimeout(render, PONG_WAIT + 100);
   }
-  function seePong() {
+  function seePong(snap) {
     const id = hub && hub.pong ? hub.pong.id : null;
     if (pongSeen === undefined) { pongSeen = id; return; }
-    if (id && id !== pongSeen) { pongSeen = id; if (pingAt) pongAt = Date.now(); }
+    if (id && id !== pongSeen) {
+      pongSeen = id; if (pingAt) pongAt = Date.now();
+      // the PC answered this phone's own ping, just now: the middle of the way there and back is the PC's clock (the class clock)
+      const t = Number(hub.pong.at), back = Date.now() - pingAt;
+      if (id === pingId && snap && confirmed(snap) && isFinite(t) && back >= 0 && back < PONG_WAIT) {
+        const v = (pingAt + Date.now()) / 2 - t;
+        if (!clkTake(v) && !(Math.abs(v) < CLK_MAX) && clkAsk.state === "wait" && clkAsk.id === id) clkAsk.state = "skew";
+      }
+    }
   }
   function answerPing(snap) {
     const pg = hub && hub.ping;
@@ -1969,14 +2081,16 @@ button.pchip { cursor: pointer; font-family: inherit; }
   let ownDone = [];
   const OWN_RETRY = ["unavailable", "deadline-exceeded", "aborted", "cancelled", "resource-exhausted", "internal", "unknown", "failed-precondition"];
   const sessionPath = () => "sessions/s" + boundPin;
-  function sendOwn(path, op, data, view) {
+  // prev: the class on this screen just before this write (a class write is matched with the class on the server, ownMerge)
+  function sendOwn(path, op, data, view, prev) {
     if (!guardOn() || !isHub()) {
       const r = db.doc(path);
-      (op === "set" ? r.set(data) : r.update(data)).catch(() => { if (op !== "set" && /^sessions\//.test(path) && refS) refS.set(clone(S)).catch(() => {}); });
+      (op === "set" ? r.set(data) : r.update(data)).catch(() => { if (op !== "set" && /^sessions\//.test(path) && refS) { const o = clone(S); delete o.by; refS.set(o).catch(() => {}); } });
       return;
     }
     if (ctl === "other" || (ctl === "free" && liveClass())) return;
-    ownQ.push({ path, op, data, view: view || null });
+    // jumped: made while a jump of this window's clock was still being checked, so its time may be the jumped one (no sample)
+    ownQ.push({ path, op, data, view: view || null, prev: prev || null, t0: prev ? prev.t0 : data && data.t0, q: performance.now(), jumped: clkVerifying });
     if (ctl === "mine") ownKick();
     else if (ctl === "free") wantHub().catch(() => {});
   }
@@ -1986,15 +2100,29 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!ownQ.length || ctl !== "mine" || !guardOn()) { ownBusy = false; return; }
     ownBusy = true;
     const part = ownQ.slice(0, ownSolo ? 1 : 30);
-    db.held(tabId, part).then(() => {
+    db.held(tabId, part.map(ownWrite)).then((res) => {
       ownQ = ownQ.filter((x) => !part.includes(x));
-      ownDone = ownDone.concat(part.filter((x) => x.view && x.path === sessionPath())).slice(-40);
+      const got = Array.isArray(res) ? res : [];
+      // what the server took, shown until it comes back; a write the class had gone past is not shown (the screen follows the server)
+      // cut: the server did not take all of it (the class had moved on, or someone changed that part meanwhile)
+      const cut = (x, i) => !!got[i] && (!!got[i].skip || (!!got[i].data && Object.keys(x.data).some((k) => k !== "by" && !(k in got[i].data))));
+      ownDone = ownDone.concat(part.map((x, i) => {
+        if (!x.view || x.path !== sessionPath() || (got[i] && got[i].skip)) return null;
+        if (!cut(x, i)) return x;
+        const view = {};
+        Object.keys(x.view).forEach((k) => { if (k in got[i].data) view[k] = x.view[k]; });
+        return Object.assign({}, x, { view });
+      }).filter(Boolean)).slice(-40);
+      part.forEach((x, i) => { if (got[i] && got[i].kept) keepHeld(got[i].kept, x, got[i].lost); });
+      if (part.some((x, i) => cut(x, i) && /^sessions\//.test(x.path))) ownRedo();
       ownSolo = false; ownPump();
     }, (e) => {
       const c = e && e.code;
       ownBusy = false;
       if (c === "lost") { lostHub(); return; }
       if (c === "hub-denied") { hubOff = true; ownFlush(); render(); return; }
+      // rules that do not know by yet (the app came before them): this class goes on without it
+      if (c === "permission-denied" && part.length === 1 && /^sessions\//.test(part[0].path) && (byOff === null || byOff !== part[0].t0)) { byOff = part[0].t0; ownKick(); return; }
       if (OWN_RETRY.includes(c)) { ownTimer = setTimeout(ownKick, 2000); return; }
       // the server refused a write (too big, a field the rules do not take): only that write goes, never the ones behind it
       if (part.length > 1) { ownSolo = true; ownKick(); return; }
@@ -2002,7 +2130,71 @@ button.pchip { cursor: pointer; font-family: inherit; }
       ownQ = ownQ.filter((x) => x !== part[0]); ownSolo = false; ownKick();
     });
   }
-  function ownFlush() { const q = ownQ; ownQ = []; q.forEach((x) => sendOwn(x.path, x.op, x.data, x.view)); }
+  function ownFlush() { const q = ownQ; ownQ = []; q.forEach((x) => sendOwn(x.path, x.op, x.data, x.view, x.prev)); }
+  // a class write goes with by (this window wrote it, now) and is matched with the class on the server in the same transaction
+  const ownWrite = (x) => /^sessions\//.test(x.path) ? Object.assign({}, x, { merge: ownMerge(x) }) : x;
+  const sceneKey = (s) => [s.cur || "", s.enteredAt || 0, (s.log || []).length].join("|");
+  const stable = (v) => v === undefined || v === null ? "null" : Array.isArray(v) ? "[" + v.map(stable).join(",") + "]"
+    : typeof v === "object" ? "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + stable(v[k])).join(",") + "}" : JSON.stringify(v);
+  const sameVal = (a, b) => stable(a) === stable(b);
+  const ADDS = ["reactions", "qs", "used", "memoId"], ONTV = ["tv", "blank", "tool"];
+  // A write made while this PC was cut off can reach a class that moved on (a phone kept steering). Pure: the transaction may run it again.
+  // Moving a scene or ending: only if the server's scene is still the one this PC moved from (else kept: the teacher is told).
+  // tv · blank · tool · vid: only on that scene and if nobody changed it meanwhile. Lights and question notes always add; materials used join.
+  // at goes past the server's; by = { pc, at } only for a write sent at once (a late one would make the phones' clock late)
+  function ownMerge(x) {
+    return (d) => {
+      const p = x.data, on = byOff === null || byOff !== x.t0, quick = performance.now() - x.q < CLK_SURE && !x.jumped && !clkVerifying;
+      // own: at is this window's own clock (an at pushed past the server's came from another device's clock, so it is no sample).
+      // Without by (rules that do not know it), a by the class still has is taken off, so the write fits those rules
+      const by = (at, own) => !on ? (d && "by" in d ? { by: { __delete: true } } : {}) : typeof at === "number" ? { by: quick && own ? { pc: tabId, at } : null } : {};
+      if (x.op === "set") { const o = Object.assign({}, p); delete o.by; return { op: "set", data: Object.assign(o, on && typeof o.at === "number" ? { by: quick ? { pc: tabId, at: o.at } : null } : {}) }; }
+      const q = Object.assign({}, p); delete q.by;
+      if (!d || !x.prev || !x.prev.started) return { op: "update", data: Object.assign(q, by(q.at, true)) };
+      // another class by now (started again, or reset): this write is about a class that is gone
+      if (d.t0 !== x.prev.t0 || !d.started) return { skip: "old" };
+      const here = sceneKey(d) === sceneKey(x.prev), group = "cur" in p || "ended" in p, out = {}, lost = {};
+      let kept = "";
+      // the server already has what this write would make (its answer was lost and it is sent again): nothing to do, nothing to say
+      const already = sceneKey(d) === sceneKey(Object.assign({}, x.prev, q));
+      Object.keys(q).forEach((k) => {
+        if (k === "at") return;
+        if (k === "used") { const u = (Array.isArray(d.used) ? d.used : []).slice(); (q.used || []).forEach((id) => { if (!u.includes(id)) u.push(id); }); out.used = u; }
+        // the record's id goes on a class that has ended (an end that did not count leaves the class running without one)
+        else if (k === "memoId") { if (d.ended) out.memoId = q.memoId; }
+        else if (ADDS.includes(k)) out[k] = q[k];
+        else if (group) return;
+        else if (here && sameVal(d[k], x.prev[k])) out[k] = q[k];
+        else if (sameVal(d[k], q[k])) return;
+        else if (ONTV.includes(k) && q[k]) lost[k] = q[k];
+      });
+      if (group && !("ended" in p && d.ended)) {
+        if (here) Object.keys(q).forEach((k) => { if (k !== "at" && !ADDS.includes(k)) out[k] = q[k]; });
+        else if (!already) kept = "ended" in p ? "end" : "move";
+      }
+      if (!kept && Object.keys(lost).length) kept = "show";
+      if (!Object.keys(out).length) return { skip: kept || "none", kept, lost };
+      const at = Math.max(Number(q.at) || 0, (Number(d.at) || 0) + 1);
+      return { op: "update", data: Object.assign(out, { at }, by(at, at === Number(q.at))), kept, lost };
+    };
+  }
+  // the class as the server has it, with what this window is still sending on top (after a write the class had gone past)
+  function ownRedo() {
+    if (!srvS) return;
+    let s = srvS;
+    s = ownDone.reduce((a, x) => Object.assign({}, a, x.view), s);
+    s = ownQ.filter((x) => x.view && x.path === sessionPath()).reduce((a, x) => Object.assign({}, a, x.view), s);
+    liveS = s; followS(); saveRun(); render();
+  }
+  // kept: this PC's move or end did not count (the class had moved on). Said on the teacher screen until dismissed or the class ends, after a reload too
+  // show: a material · blank screen · tool this PC put up that did not count (kept with its values, for '다시 띄우기').
+  // A move or an end that did not count says more, so a later 'show' does not replace it
+  function keepHeld(kind, x, lost) {
+    if (!x.prev || !x.prev.started) return;
+    if (kind === "show" && clkHeld && clkHeld.t0 === x.prev.t0 && clkHeld.kind !== "show") return;
+    clkHeld = { kind, cur: kind === "move" ? x.data.cur : null, set: kind === "show" ? Object.assign({}, (clkHeld && clkHeld.kind === "show" && clkHeld.t0 === x.prev.t0 && clkHeld.set) || {}, lost || {}) : null, t0: x.prev.t0 };
+    saveRun(); render();
+  }
 
   // ---------- phones let in by PIN (teacher PC side): this PC holds its PIN for a while, phones ask, the teacher allows ----------
   // The PIN is the class PIN, the same number on the PC and the phone. While the phone connection is shown, this PC holds
@@ -2114,11 +2306,14 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (pinDevice() && !rehearsing) return;
     // a PC that does not hold the class changes only its own screen
     if (!rehearsing && isHub() && !holds()) { S = n; render(); return; }
+    if (!rehearsing && clkLead()) clkCheck();
     if (db && !rehearsing) n = Object.assign({}, n, { at: now() }, isHub() && db.pair ? { run: n.run || runId() } : {});
+    if ("by" in n) { n = Object.assign({}, n); delete n.by; }
     S = n; if (!rehearsing) { liveS = n; if (refS) { if (isHub()) sendOwn(sessionPath(), "set", clone(n), n); else refS.set(clone(n)).catch(() => {}); } saveRun(); } render();
   }
   // add: items to put at the end of a list on the server too (lights, question notes), so two devices pressing at once both count
   function patchS(p, add) {
+    if (!rehearsing && clkLead()) clkCheck();
     if ("cur" in p && p.cur !== S.cur && S.vid && !("vid" in p)) p = Object.assign({}, p, { vid: null });
     const before = S;
     if (!rehearsing && isHub() && !holds()) { S = Object.assign({}, S, p); render(); return; }
@@ -2129,7 +2324,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       if (refS) {
         const out = clone(p);
         if (add && db.append) Object.keys(add).forEach((k) => { out[k] = db.append.apply(null, add[k]); });
-        if (isHub()) sendOwn(sessionPath(), "update", out, p);
+        if (isHub()) sendOwn(sessionPath(), "update", out, p, before);
         else if (pinDevice()) sendCmds(p, add, before);
         else {
           // a phone's tap counts only on the class as the server last showed it, and only within a few seconds of the tap:
@@ -2217,7 +2412,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
     switch (c.op) {
       case "go":
         if (moved || typeof c.v !== "string" || !pageById(c.v) || c.v === S.cur) return false;
-        patchS({ log: leave(), cur: c.v, enteredAt: now(), tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null });
+        { const t = stamp(); patchS({ log: leave(t), cur: c.v, enteredAt: t, tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); }
         return mark();
       case "signal": {
         if (c.id !== S.cur || !(SIG[c.v] || c.v === "clear") || C.reactions === false) return false;
@@ -2360,7 +2555,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
     runOffer = null; runDrop = false;
     const marks = {};
     Object.keys(said).forEach((k) => { if (said[k].size) marks[k] = Array.from(said[k]); });
-    runStore.set(runKey(), { v: 1, at: now(), lessonId: D.kind === "example" ? D.lessonId : null, title: D.title, deck: D.kind === "example" ? null : wordsOnly(D), S: s, said: marks });
+    // clk: this class's clock on this window (a PC that took the class over keeps the clock it followed), held: a write the class went past
+    runStore.set(runKey(), { v: 1, at: now(), lessonId: D.kind === "example" ? D.lessonId : null, title: D.title, deck: D.kind === "example" ? null : wordsOnly(D), S: s, said: marks,
+      clk: { off: clockOff, base: clkBase && clkBase.t0 === s.t0 ? clkBase : null }, held: clkHeld && clkHeld.t0 === s.t0 ? clkHeld : null });
   }
   // pick the run up where it stopped: the same lesson, scene, clock, lights and notes; nothing is recorded twice
   function resumeRun(finish) {
@@ -2385,10 +2582,15 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!pageById(s.cur)) s.cur = order()[0];
     // picking the same class up again keeps its run, so a phone let in for it keeps working
     if (s.run) { curRun = s.run; hubKey = ""; }
+    // the clock this class ran on in this window, and a write the class went past (still said after the reload)
+    if (x.clk && typeof x.clk.off === "number" && isFinite(x.clk.off) && Math.abs(x.clk.off) < 86400000) clockOff = x.clk.off;
+    clkBase = x.clk && x.clk.base && x.clk.base.t0 === s.t0 ? x.clk.base : null;
+    clkHeld = x.held && x.held.t0 === s.t0 ? x.held : null;
     // a run ended later: its last scene stops at the last thing done in class, not at the moment it was found
     if (finish) s.enteredAt += Math.max(0, now() - ((live && live.at) || x.at));
     // the account already has this class as it is: nothing to send. Writing it back would only overwrite a phone tapping at this very moment
     if (live && !finish && s.cur === live.cur) { S = s; liveS = s; saveRun(); } else commitS(s);
+    clkTried = -1e9; clkBaseline();
     commitD(D);
     if (finish) { endLesson(); setRole("presenter"); return; }
     if (C.presenter && !stageDoc()) openStageWin();
@@ -2413,6 +2615,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       '<div class="row"><button class="btn small" data-act="run-drop-yes">버리기</button><button class="btn small ghost" data-act="run-drop-no">취소</button></div>');
     return box("<b>끝나지 않은 수업이 있어요</b><span>‘" + esc(x.title) + "’ · " + (i + 1) + " / " + list.length + " ‘" + esc(p.label || "") + "’ · " + dt(xs.t0) + " 시작 · 신호등 " + nLit + "개 · 질문 메모 " + nQ + "개</span>" +
       (x.deck && x.deck.kind === "pdf" ? "<span>올린 파일의 쪽 그림은 저장하지 않아서, 이어서 하면 장면 이름만 보여요.</span>" : "") +
+      (x.held && x.held.t0 === xs.t0 ? "<span>연결이 끊긴 동안 반영하지 않은 조작이 있어요. 이어서 하면 교사 화면에서 볼 수 있어요.</span>" : "") +
       // what happens to the TV, said before the press (2026-11-19, docs/STAGE-KEEP.md)
       (!C.presenter ? "" : stageHeld && stageDoc() ? '<span class="run-tv">수업 화면(TV)은 열린 그대로예요. ‘이어서 하기’를 누르면 그 창에 지금 장면이 나와요.</span>'
         : !stageLooked || stageLive() ? "" : '<span class="run-tv">수업 화면(TV) 창은 닫혀 있어요. ‘이어서 하기’를 누르면 새로 열려요' + (screenObjs && screenObjs[Number(C.monitor) - 1] ? "(" + Number(C.monitor) + "번 모니터)." : ". TV로 옮긴 뒤 ‘전체 화면’을 눌러 주세요.") + "</span>") +
@@ -2987,8 +3190,13 @@ button.pchip { cursor: pointer; font-family: inherit; }
   }
 
   // ---------- navigation ----------
-  function leave() { return S.log.concat([{ id: S.cur, sec: Math.round((now() - (S.enteredAt || now())) / 1000) }]).slice(-80); }
-  function go(id) { if (id && id !== S.cur && S.started && !S.ended) { buzz(); tocOpen = false; sheetOpen = false; drawerOpen = false; lastNudge = 0; endAsk = false; sug = null; patchS({ log: leave(), cur: id, enteredAt: now(), tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); } }
+  // a scene's time to the millisecond (R2, docs/CLASS-CLOCK.md): rounded once, in the record, so short scenes do not vanish
+  // A move (or the end) is stamped no earlier than the start of the scene it leaves (2026-11-23, docs/CLASS-CLOCK.md 2-7): the device that
+  // moves has seen that start, so the move cannot have come before it, even when its clock (set a few hundred ms apart from the device that
+  // made that start) says so. The stored times stay in order; the next scene takes up the difference, so scenes still add up to the whole
+  const stamp = () => Math.max(now(), Number(S.enteredAt) || 0);
+  function leave(t) { const at = t === undefined ? stamp() : t; return S.log.concat([{ id: S.cur, sec: Math.round(at - (S.enteredAt || at)) / 1000 }]).slice(-80); }
+  function go(id) { if (id && id !== S.cur && S.started && !S.ended) { buzz(); tocOpen = false; sheetOpen = false; drawerOpen = false; lastNudge = 0; endAsk = false; sug = null; const t = stamp(); patchS({ log: leave(t), cur: id, enteredAt: t, tv: null, blank: null, tool: S.tool && S.tool.kind === "timer" ? S.tool : null }); } }
   function next() {
     if (!S.started || S.ended) return;
     if (vidStep()) return;
@@ -3031,7 +3239,10 @@ button.pchip { cursor: pointer; font-family: inherit; }
   function start(remote) {
     // a class that already ran under this run (one left open, now started over) gets a run of its own
     if (db && liveS.started && liveS.run && liveS.run === curRun) newRun();
-    libOpen = false; libTouched = true; moreOpen = false; endAsk = false; toolsOpen = false; drawerOpen = false; Object.keys(said).forEach((k) => delete said[k]); commitS(fresh()); commitD(D); if (C.presenter && !stageDoc() && !remote) openStageWin(); setRole(C.presenter ? "presenter" : "stage"); }
+    // a new class on the window that holds it runs on this window's own clock (a clock taken over for the last class stays with that class)
+    if (db && clkLead()) clockOff = 0;
+    clkBase = null; clkWarn = false; clkHeld = null; byOff = null;
+    libOpen = false; libTouched = true; moreOpen = false; endAsk = false; toolsOpen = false; drawerOpen = false; Object.keys(said).forEach((k) => delete said[k]); commitS(fresh()); clkTried = -1e9; clkBaseline(); commitD(D); if (C.presenter && !stageDoc() && !remote) openStageWin(); setRole(C.presenter ? "presenter" : "stage"); }
   // a phone rehearses on the phone screen it will teach from; a teacher PC on the presenter view
   function startRehearsal() { libOpen = false; libTouched = true; rehearsing = true; moreOpen = false; endAsk = false; toolsOpen = false; drawerOpen = false; S = fresh(); role = narrow() ? "remote" : "presenter"; tocOpen = false; sheetOpen = false; render(); window.scrollTo(0, 0); }
   function exitRehearsal() { rehearsing = false; moreOpen = false; endAsk = false; toolsOpen = false; drawerOpen = false; role = null; followS(); tocOpen = false; sheetOpen = false; render(); window.scrollTo(0, 0); }
@@ -3039,8 +3250,15 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!S.started || S.ended) return;
     // a phone asks; the PC ends the class and writes the record
     if (db && !isHub() && !rehearsing) { askEnd(); return; }
-    endAsk = false; lastNudge = 0; patchS({ log: leave(), ended: true, tv: null, blank: null, tool: null }); saveMemo(); endDevices();
+    endAsk = false; lastNudge = 0; patchS({ log: leave(), ended: true, tv: null, blank: null, tool: null }); saveMemo();
+    // cut off now, the end may not count (a phone may have moved the class on): the phones are let go once the server has the end
+    if (db && guardOn() && isHub() && !synced) endLater = S.t0; else { endLater = null; endDevices(); }
   }
+  let endLater = null;
+  // the phone's line while its first clock is on its way (2026-11-23): short while it waits, the reason and '다시 시도' when it did not come
+  const clkNote = () => clkAsk.state === "fail" ? '<div class="warn-note clk-sync" role="status">교사 PC와 수업 시간을 맞추지 못했어요. PC가 켜져 있고 인터넷에 이어져 있는지 확인해 주세요. <button class="btn small" data-act="clk-retry">다시 시도</button></div>'
+    : clkAsk.state === "skew" ? '<div class="warn-note clk-sync" role="status">이 휴대폰 시계가 교사 PC와 2분 넘게 달라요. 휴대폰 설정에서 날짜와 시간을 ‘자동’으로 맞춘 뒤 다시 시도해 주세요. <button class="btn small" data-act="clk-retry">다시 시도</button></div>'
+    : '<div class="clk-sync wait" role="status">수업 시간 맞추는 중…</div>';
   const endConfirm = () => { const busy = !!mEnd && mEnd.state === "sent"; return '<div class="confirm end-confirm pop" role="group" aria-label="수업 끝내기"><b>수업을 끝낼까요?</b><span>끝내면 기록이 저장되고 수업 화면에 ‘수업 끝’이 보여요.</span>' +
     '<button class="btn small warm" data-act="end"' + (busy ? " disabled" : "") + ">" + (busy ? "PC에서 끝내는 중…" : "수업 종료") + '</button><button class="btn small ghost" data-act="end-no">계속 수업</button></div>'; };
   // ---------- traffic light and question notes ----------
@@ -3077,7 +3295,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
   function toolPick() { buzz(); const n = 1 + Math.floor(Math.random() * Math.max(1, Number(C.classSize) || 25)); patchS({ tool: { kind: "pick", n, at: now() } }); }
 
   // ---------- lesson memo ----------
-  function memoData() {
+  function memoData(endAt) {
     const lab = (id) => (slideOf(id) || {}).label || "";
     const time = timeBy();
     const seen = new Set(S.log.map((x) => x.id));
@@ -3097,10 +3315,16 @@ button.pchip { cursor: pointer; font-family: inherit; }
     // v2: the traffic light per scene + question notes; text only, no student names.
     // v3 (2026-11-12, docs/RECORDS.md): when the class started (startAt) and ended (endAt · at), and each scene's and question's scene id.
     // sig counts the scenes by their last light (one light per scene: the class as the teacher judged it, never a student)
-    const end = now();
+    const end = endAt || now();
+    // R2 (2026-11-23): the whole class to 0.1 s, rounded once; each scene rounded down to 0.1 s and what is left goes to the scenes
+    // whose rest was largest, so the scenes add up to the whole exactly (in tenths)
+    const tenths = Math.round(S.log.reduce((a, x) => a + (Number(x.sec) || 0) * 1000, 0) / 100);
+    const ids = order(), raw = ids.map((id) => (time[id] || 0) * 10), low = raw.map((x) => Math.floor(x + 1e-6));
+    let left = tenths - low.reduce((a, x) => a + x, 0);
+    raw.map((x, i) => ({ i, f: x - low[i] })).sort((a, b) => b.f - a.f).forEach((r) => { if (left > 0 && r.f > 1e-6) { low[r.i]++; left--; } });
     return { v: 3, key: D.key || D.title, title: D.title, grade: D.grade || null, subject: D.subject || "", cls: C.className || "", at: end, startAt: S.t0 || null, endAt: end,
-      totalSec: S.log.reduce((a, x) => a + x.sec, 0), plannedMin: plannedTotal(), again, used: S.used, text: "",
-      scenes: order().map((id) => ({ id, label: lab(id), min: (slideOf(id) || {}).min || 0, sec: Math.round(time[id] || 0), sig: sigs[id] || "" })),
+      totalSec: tenths / 10, plannedMin: plannedTotal(), again, used: S.used, text: "",
+      scenes: ids.map((id, i) => ({ id, label: lab(id), min: (slideOf(id) || {}).min || 0, sec: low[i] / 10, sig: sigs[id] || "" })),
       sig: { red: count("red"), yellow: count("yellow"), green: count("green") },
       questions: order().flatMap((id) => sceneQs(id).map((q) => ({ sid: id, label: lab(id), text: q.text || "질문이 있었어요" }))).slice(0, 20),
       // every light pressed, in order (a press of the same light again is "clear")
@@ -3120,17 +3344,53 @@ button.pchip { cursor: pointer; font-family: inherit; }
     // a copy waits in localStorage until IndexedDB has it, in case the page goes away mid-write
     if (keepsHere()) {
       // acct: made on this account's PC, so it goes to the account by itself (now, or when the internet is back)
-      const rec = Object.assign({ id: "local-" + (S.t0 || now()).toString(36) }, m, recAcct() ? { acct: ownerTag } : {});
+      const id = "local-" + (S.t0 || now()).toString(36), old = LOCAL.find((x) => x.id === id);
+      // the same class ended again (an end that did not count): what the teacher wrote or changed on its record stays
+      const mine = old && old.editedAt ? { text: old.text || "", again: old.again || [], questions: old.questions || [], editedAt: old.editedAt, trashedAt: old.trashedAt || null } : {};
+      const sent = old && old.srvAt ? { srvAt: old.srvAt, acctId: old.acctId } : {};
+      const rec = Object.assign({ id }, m, recAcct() ? { acct: ownerTag } : {}, mine, sent);
       LOCAL = [rec].concat(LOCAL.filter((x) => x.id !== rec.id));
       mergeRecs();
       runStore.set(doneKey(), rec);
       local.put("records", rec).then(() => { runStore.del(doneKey()); localOK = true; render(); }, () => { localOK = false; render(); });
       patchS({ memoId: rec.id });
-      recPush(rec);
+      // the account keeps a record as it was first written (its rules let only the notes · trash change), so the first copy there
+      // must be the class as the server finally has it: a class this window holds waits for that (recFinal), a little while at most once online
+      if (recAcct() && guardOn() && isHub() && holds() && refS) recHold.set(rec.id, Date.now()); else recPush(rec);
       return;
     }
     if (S.memoId) return;
     db.collection("memos").add(m).then((ref) => { if (ref && ref.id) patchS({ memoId: ref.id }); }).catch(() => {});
+  }
+  // The record again from the class as the server finally has it (2026-11-23, docs/CLASS-CLOCK.md): a phone's lights, question notes
+  // or moves that reached the server only after this PC ended (it was cut off then). The same id, so never a second record;
+  // the end is where the last scene stopped. Once per class, and never over a record the teacher has already changed
+  // recHold: records whose first push to the account waits for this (id → when it started waiting). recRelease: send it as it is now
+  let recFinalT0 = null;
+  const recHold = new Map(), REC_HOLD = 120000;
+  // one already in the account stays there as it is (the rules let only its notes change); this browser's copy has the rest
+  function recRelease(id) { if (!recHold.delete(id)) return; const r = LOCAL.find((x) => x.id === id); if (r && !r.srvAt) recPush(r); }
+  function recFinal() {
+    const s = liveS, id = "local-" + Number(s.t0).toString(36);
+    if (recFinalT0 === s.t0 || S !== liveS || s.memoId !== id || !keepsHere()) return;
+    const rec = LOCAL.find((x) => x.id === id);
+    if (!rec) return;
+    if (recSync[id] === "sending" || recSync[id] === "wait") { setTimeout(() => { if (S === liveS && liveS.t0 === s.t0) recFinal(); }, 3000); return; }
+    recFinalT0 = s.t0;
+    const last = (s.log || [])[(s.log || []).length - 1], end = last && last.id === s.cur && s.enteredAt ? s.enteredAt + Math.round((Number(last.sec) || 0) * 1000) : rec.endAt;
+    // what the class itself says (times, lights, materials) comes from the server's final class; what the teacher writes or changed
+    // (memo, what to teach again, question notes, trash) stays as it is
+    const m = memoData(end), comp = { totalSec: m.totalSec, scenes: m.scenes, sig: m.sig, events: m.events, used: m.used, usedTitles: m.usedTitles, endAt: m.endAt, at: m.at };
+    if (!rec.editedAt) Object.assign(comp, { questions: m.questions, again: m.again });
+    const pick = (x) => JSON.stringify([x.totalSec, x.scenes, x.sig, x.events, x.used, x.questions, x.again]);
+    if (pick(Object.assign({}, rec, comp)) !== pick(rec)) {
+      const next = Object.assign({}, rec, comp);
+      LOCAL = [next].concat(LOCAL.filter((x) => x.id !== id));
+      mergeRecs();
+      local.put("records", next).then(() => { localOK = true; render(); }, () => { localOK = false; render(); });
+    }
+    // to the account once, as it finally is (an account copy already there stays as it is: the rules do not let it change)
+    recRelease(id);
   }
   // a change to a record (memo · what to teach again · question notes · trash): this browser's copy and the account's copy alike
   function updateMemo(id, p) {
@@ -3148,7 +3408,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       const fix = (list) => list.map((x) => x.acctId === aid ? Object.assign({}, x, p) : x);
       ACCT = fix(ACCT); ACCT_OLD = fix(ACCT_OLD); ACCT_TRASH = fix(ACCT_TRASH);
       recSend(id, () => db.doc("records/" + aid).update(p));
-    } else if (l && l.acct === ownerTag && recAcct()) recPush(LOCAL.find((x) => x.id === id));
+    } else if (l && l.acct === ownerTag && recAcct() && !recHold.has(id)) recPush(LOCAL.find((x) => x.id === id));
     mergeRecs(); render();
   }
 
@@ -3174,8 +3434,8 @@ button.pchip { cursor: pointer; font-family: inherit; }
     const sg = recSig(e), qs = recQs(e), endAt = numOr(e.endAt, numOr(e.at, 0));
     return {
       v: 3, key: str(e.key, 300), title: str(e.title || "수업", 200), grade: typeof e.grade === "number" ? e.grade : null, subject: str(e.subject, 40), cls: str(e.cls, 60),
-      startAt: typeof e.startAt === "number" ? e.startAt : null, endAt, at: endAt, totalSec: Math.max(0, Math.round(numOr(e.totalSec, 0))), plannedMin: numOr(e.plannedMin, 0),
-      scenes: (e.scenes || []).slice(0, 120).map((x) => ({ id: str(x.id, 60), label: str(x.label, 80), min: numOr(x.min, 0), sec: Math.round(numOr(x.sec, 0)), sig: SIGS.includes(x.sig) ? x.sig : "" })),
+      startAt: typeof e.startAt === "number" ? e.startAt : null, endAt, at: endAt, totalSec: Math.max(0, Math.round(numOr(e.totalSec, 0) * 10) / 10), plannedMin: numOr(e.plannedMin, 0),
+      scenes: (e.scenes || []).slice(0, 120).map((x) => ({ id: str(x.id, 60), label: str(x.label, 80), min: numOr(x.min, 0), sec: Math.round(numOr(x.sec, 0) * 10) / 10, sig: SIGS.includes(x.sig) ? x.sig : "" })),
       sig: { red: numOr(sg.red, 0), yellow: numOr(sg.yellow, 0), green: numOr(sg.green, 0) },
       questions: qs.slice(0, 40).map((q) => ({ sid: str(q.sid, 60), label: str(q.label, 80), text: str(q.text, 200) })),
       again: (e.again || []).slice(0, 40).map((x) => str(x, 300)), text: str(e.text, 2000),
@@ -3209,7 +3469,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // records made on this account's PC that have not reached the account yet (the internet was down, or the page closed first)
   function recRetry() {
     if (!recAcct()) return;
-    LOCAL.filter((x) => x.acct === ownerTag && !x.srvAt && !x.claimedBy).forEach((x) => { if (recSync[x.id] !== "sending" && recSync[x.id] !== "wait") recPush(x); });
+    // a held record goes as it is after a while online, unless its class is running again (an end that did not count: the next end saves it)
+    recHold.forEach((at, id) => { if (synced && Date.now() - at > REC_HOLD && !(liveClass() && "local-" + Number(liveS.t0).toString(36) === id)) recRelease(id); });
+    LOCAL.filter((x) => x.acct === ownerTag && !x.srvAt && !x.claimedBy && !recHold.has(x.id)).forEach((x) => { if (recSync[x.id] !== "sending" && recSync[x.id] !== "wait") recPush(x); });
   }
   window.addEventListener("online", () => setTimeout(recRetry, 1500));
   setInterval(() => { if (recAcct() && LOCAL.some((x) => x.acct === ownerTag && !x.srvAt)) recRetry(); }, 30000);
@@ -3284,6 +3546,8 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!e) return "";
     const st = recSync[e.id];
     if (st === "fail") return "fail";
+    // waiting for the class as the server finally has it (recHold): cut off, it says so as before; online it is on its way
+    if (recHold.has(e.id) && !e.srvAt) return synced ? "sending" : "wait";
     if (st === "wait") return "wait";
     if (st === "sending") return "sending";
     if (e.inAcct && !e.pending) return "ok";
@@ -3937,6 +4201,21 @@ button.pchip { cursor: pointer; font-family: inherit; }
     const to = slideOf(undoMove.to.cur), back = undoMove.from.cur !== undoMove.to.cur;
     return '<div class="undo-move" role="status"><span>' + (back ? "‘" + esc((to || {}).label || "") + "’(으)로 넘겼어요." : "영상을 내렸어요.") + " 영상은 멈춘 곳을 기억해요.</span>" +
       '<button class="btn small warm" data-act="vid-undo">' + (back ? "이전 장면으로 되돌리기" : "영상 다시 띄우기") + ' · <b class="js-undo-left">' + Math.max(0, Math.ceil((UNDO_MS - (now() - undoMove.at)) / 1000)) + "</b>초</button></div>";
+  }
+  // the class clock on the teacher screen (2026-11-23, docs/CLASS-CLOCK.md): a move or an end of this PC that did not count
+  // (a phone moved the class on while this PC was cut off), and a clock jump this PC could not check. Over the dock, like undoBar
+  function clkBar() {
+    const h = clkHeld && S.started && !S.ended && clkHeld.t0 === S.t0 ? clkHeld : null;
+    if (!h && !clkWarn) return "";
+    const to = h && h.cur && h.cur !== S.cur ? slideOf(h.cur) : null;
+    return '<div class="undo-move clk-held" role="status">' +
+      (h ? "<span>" + (h.kind === "end" ? "끝내기 뒤에도 휴대폰에서 수업이 이어졌어요. 끝내려면 다시 눌러 주세요."
+        : h.kind === "show" ? "연결이 끊긴 동안 수업이 바뀌어서 이 PC에서 띄운 것은 반영하지 않았어요."
+        : "연결이 끊긴 동안 휴대폰이 넘겨서 이 PC에서 넘긴 것은 반영하지 않았어요.") + "</span>" : "") +
+      (clkWarn ? "<span>시계를 확인하지 못했어요. 수업 시간이 조금 다를 수 있어요.</span>" : "") +
+      (to ? '<button class="btn small" data-act="clk-go">그 장면으로 가기</button>' : "") +
+      (h && h.kind === "show" && h.set ? '<button class="btn small" data-act="clk-show">다시 띄우기</button>' : "") +
+      '<button class="icon-btn" data-act="clk-x" aria-label="알림 닫기">' + ic("x", 16) + "</button></div>";
   }
   function tvKind(r) {
     if (r.card && (r.card.pic ? DATA.pics[r.card.pic] : r.card.layout)) return "card";
@@ -5980,7 +6259,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       "</div>" +
       '<div class="pv-right' + (drawerOpen ? " with-drawer" : "") + (sp ? " with-sug" : "") + '"><div class="pv-screen' + (S.tv ? " mat" : "") + '"><span class="label">' + ic("monitor", 15) + '수업 화면<span class="onair' + (S.tv ? " mat" : "") + '"><i></i>' + onTv + "</span></span>" +
         '<div class="fit">' + slideHTML(S.cur, { overlay: true }) + "</div>" + vidBar() + "</div>" + sp + (drawerOpen ? drawerPanel(false) : nextLine()) + "</div></div>" +
-      bottomBar() + undoBar() + "</div>";
+      bottomBar() + (undoLive() ? undoBar() : clkBar()) + "</div>";
   }
   function viewPin() {
     return '<div class="wrap remote">' + topbar("모바일 리모컨") + '<form class="panel" id="pin-form"><div class="label">PIN</div>' +
@@ -6061,8 +6340,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
       gsPhRow() + (gsPhOn() ? '<div class="panel prompter">' + prompterInner(true) + "</div>" : "") +
       (tocOpen || sheetOpen ? '<button class="scrim" data-act="' + (tocOpen ? "toc" : "sheet") + '" aria-label="닫기" tabindex="-1"></button>' : "") +
       (tocOpen ? tocSheet() : "") + (sheetOpen ? drawerSheet() : "") +
-      '<div class="thumb-nav' + (frozen() ? " frozen" : "") + '"><div class="in">' +
+      '<div class="thumb-nav' + (frozen() || clkWaiting() ? " frozen" : "") + '"><div class="in">' +
         (frozen() ? '<div class="warn-note" role="status">연결이 끊겼어요. 다시 연결되면 지금 장면으로 맞춰요. 그동안은 넘기거나 누를 수 없어요.</div>'
+          : clkWaiting() ? clkNote()
           : endNote() ? '<div class="warn-note end-note" role="status">' + esc(endNote()) + "</div>"
           : Date.now() - unsentAt < 4000 ? '<div class="warn-note" role="status">' + (unsentWhy === "wait" ? "교사 PC가 응답하지 않아요" : unsentWhy === "no" ? "PC가 받지 않았어요(그 사이 수업이 바뀌었어요)" : "보내지 못했어요") + ". 지금 장면을 보고 다시 눌러 주세요.</div>" : "") +
         (endAsk ? endConfirm() : "") + sugPanel() + signalRow(true) + '<div class="nav-row">' + navButtons(true) + "</div></div></div></div>";
@@ -6330,7 +6610,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!b || b.disabled) return;
     const a = b.getAttribute("data-act"), v = b.getAttribute("data-v");
     const focus = (id) => { const el = document.getElementById(id); if (el) el.focus(); };
-    if ((frozen() || lost()) && STEER.has(a)) { render(); return; }
+    if ((frozen() || lost() || clkWaiting()) && STEER.has(a)) { render(); return; }
     switch (a) {
       case "noop": break;
       // '내 수업': a row's ⋯ menu (open · copy · delete), the file picker, the account menu
@@ -6375,7 +6655,11 @@ button.pchip { cursor: pointer; font-family: inherit; }
         if (liveClass() && isHub() && holds() && !rehearsing) endLesson();
         render();
         const t0 = Date.now();
-        const out = () => { if (ownQ.length && Date.now() - t0 < 6000) { setTimeout(out, 150); return; } stageQuit(); mineDone().then(() => window.naviAuth.signOut()); };
+        const out = () => {
+          if ((ownQ.length || recHold.size || Object.keys(recSync).some((k) => recSync[k] === "sending")) && Date.now() - t0 < 6000) { setTimeout(out, 150); return; }
+          Array.from(recHold.keys()).forEach(recRelease);
+          stageQuit(); mineDone().then(() => window.naviAuth.signOut());
+        };
         out();
         break;
       }
@@ -6549,6 +6833,20 @@ button.pchip { cursor: pointer; font-family: inherit; }
       case "vid-play": vidPlay(); break;
       case "vid-pause": vidPause(); break;
       case "vid-undo": undoVid(); break;
+      case "clk-go": { const to = clkHeld && clkHeld.cur; clkHeld = null; if (to && pageById(to)) go(to); saveRun(); render(); break; }
+      case "clk-x": clkHeld = null; clkWarn = false; saveRun(); render(); break;
+      case "clk-retry": clkAsk = { state: "", id: "", prev: "", at: 0, tries: 0, bumps: 0 }; clkSyncTick(); render(); break;
+      case "clk-show": {
+        // put up again, now, on the scene the class is on: the material (if the lesson still has it), the blank screen, the tool (a timer starts over)
+        const set = (clkHeld && clkHeld.set) || {}, p = {};
+        clkHeld = null;
+        if (set.tv && resById(set.tv)) { p.tv = set.tv; p.used = S.used.includes(set.tv) ? S.used : S.used.concat([set.tv]); }
+        if (set.blank === "black" || set.blank === "white") p.blank = set.blank;
+        if (set.tool && set.tool.kind === "timer" && Number.isFinite(set.tool.sec)) p.tool = { kind: "timer", end: now() + set.tool.sec * 1000, sec: set.tool.sec };
+        else if (set.tool && set.tool.kind === "pick") p.tool = { kind: "pick", n: set.tool.n, at: now() };
+        if (Object.keys(p).length && S.started && !S.ended) patchS(p); else { saveRun(); render(); }
+        break;
+      }
       case "file-del-ask": fileDel = v; fileNote = ""; render(); break;
       case "file-del-no": fileDel = null; render(); break;
       case "file-del": delFile(v); break;
@@ -6808,14 +7106,14 @@ button.pchip { cursor: pointer; font-family: inherit; }
     const f = ev.target;
     if (f && f.id === "pin-form") { ev.preventDefault(); tryPin(); }
     if (f && f.id === "pair-form") { ev.preventDefault(); const p = pinDraft.join(""); if (window.naviAuth && window.naviAuth.pinJoin) window.naviAuth.pinJoin(p, p === qrPin ? qrTag : ""); }
-    else if (f && f.id === "q-form") { ev.preventDefault(); if (!frozen() && !lost()) addQuestion(qDraft); }
+    else if (f && f.id === "q-form") { ev.preventDefault(); if (!frozen() && !lost() && !clkWaiting()) addQuestion(qDraft); }
   });
 
   // PowerPoint keys; wireless clickers send PageDown / PageUp (or arrows) and B for a blank screen
   function onKey(ev) {
     const tg = ev.target;
     const inPopup = !!ev.view && ev.view !== window;
-    if ((!role && !inPopup) || !S.started || S.ended || frozen() || lost()) return;
+    if ((!role && !inPopup) || !S.started || S.ended || frozen() || lost() || clkWaiting()) return;
     // a clicker's slideshow button sends F5: mid-lesson a reload would lose the lesson so far
     if (ev.key === "F5") { ev.preventDefault(); return; }
     // keys pressed on the student window leave a rehearsal alone (the window shows the class, not the rehearsal)
@@ -6881,9 +7179,17 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (au && au.pinStage === "wait" && au.pinExp) document.querySelectorAll(".js-pin-left").forEach((el) => { el.textContent = fmt((au.pinExp - Date.now()) / 1000); });
   }, 1000);
   let tick = 0;
+  // the class clock: a jump of this device's clock is noticed within a second (and on waking up, coming back online)
+  setInterval(() => { clkCheck(); clkSyncTick(); }, 1000);
+  const clkWake = () => { clkSkip = true; clkCheck(); };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") clkWake(); });
+  document.addEventListener("resume", clkWake);
+  window.addEventListener("online", clkWake);
   setInterval(() => {
     if (!S.started || S.ended) return;
     tick++;
+    // the holder's baseline against the site's clock (once per class: at the start, again every 10 seconds until it comes)
+    if (!rehearsing) clkBaseline();
     // a student window that vanished without saying so (crashed, killed): the teacher screen says it within a second
     if (stageWin && stageWin.closed) { stageWin = null; render(); }
     const sd = stageDoc();
@@ -6939,12 +7245,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
       if (synced) everSynced = true;
       const prev = liveS, first = !seenSession;
       const d = snap.exists ? snap.data() : null;
+      // a device that follows sets its clock from the holder's own writes only (the class clock, above)
+      if (!clkLead()) clkSee(d, snap);
       if (d && d.v === V) {
-        // align this device's clock with the device that just moved the lesson
-        if (seenSession && !snap.metadata.hasPendingWrites && !(isHub() && ownQ.length) && d.enteredAt && d.enteredAt !== liveS.enteredAt) {
-          const o = Date.now() - d.enteredAt;
-          if (Math.abs(o) < 120000) clockOff = o;
-        }
         liveS = Object.assign(blankS(), clone(d));
       } else liveS = blankS();
       srvS = liveS;
@@ -6966,8 +7269,13 @@ button.pchip { cursor: pointer; font-family: inherit; }
       if (keepsHere() && isHub() && !rehearsing && holds()) {
         if (!first && liveS.started && liveS.ended && !liveS.memoId && prev.started && !prev.ended && prev.t0 === liveS.t0) { saveMemo(); endDevices(); }
         else if (role && !runOffer) saveRun();
+        if (confirmed(snap) && !snap.metadata.hasPendingWrites && !ownQ.some((x) => x.path === sessionPath()) && liveS.started && liveS.ended && liveS.memoId) {
+          if (endLater !== null && endLater === liveS.t0) { endLater = null; endDevices(); }
+          recFinal();
+        }
       }
       offerFromAccount();
+      clkSyncTick();
       render();
     }, () => { synced = false; render(); });
   }
@@ -7020,7 +7328,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
         refH.onSnapshot((snap) => {
           hub = snap.exists ? snap.data() : null;
           if (confirmed(snap)) { hubSeen = true; ctlEval(); }
-          if (isHub()) { takeStart(snap); answerPing(snap); } else { startAnswer(); seePong(); }
+          // another window holds the class now: its clock is the class clock, so the samples start over (clockOff stays until then)
+          if (hubPc() !== clkPc) { clkPc = hubPc(); clkSamples = []; }
+          if (isHub()) { takeStart(snap); answerPing(snap); } else { startAnswer(); seePong(snap); clkBumped(); clkSyncTick(); }
           render();
         }, (e) => { if (e && e.code === "permission-denied") { hubOff = true; ownFlush(); followS(); render(); } });
         // closing or reloading the PC says so, so a phone does not offer to start on a PC that is gone

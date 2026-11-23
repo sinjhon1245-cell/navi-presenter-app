@@ -326,7 +326,7 @@
     // db.append(…)로 만든 값은 서버에서 배열 끝에 덧붙여요(arrayUnion). 두 기기가 같은 순간 눌러도 둘 다 남아요
     const prep = (o) => {
       const out = {};
-      Object.keys(o).forEach((k) => { const v = o[k]; out[k] = v && v.__append ? F.arrayUnion.apply(null, v.__append.map((x) => pack(x, true))) : pack(v, false); });
+      Object.keys(o).forEach((k) => { const v = o[k]; out[k] = v && v.__append ? F.arrayUnion.apply(null, v.__append.map((x) => pack(x, true))) : v && v.__delete === true ? F.deleteField() : pack(v, false); });
       return out;
     };
     // 따라가는 기기(휴대폰)의 조작은 ‘조건부’로 보내요(update(p, { base })):
@@ -424,8 +424,34 @@
           if (o.until && Date.now() > o.until) throw nope("late");
         }
         if (o && o.calm && await running(tx, o.calm)) throw nope("live");
-        list.forEach((w) => { const ref = F.doc(fb.fs, base + w.path); if (w.op === "set") tx.set(ref, prep(w.data)); else tx.update(ref, prep(w.data)); });
+        // merge(서버의 지금 문서) → { op, data } 또는 { skip }: 끊긴 동안 쌓인 PC 쓰기를 서버의 지금 수업과 맞춰 봐요(수업 시계, docs/CLASS-CLOCK.md).
+        // 읽기는 쓰기보다 먼저라서 문서마다 한 번 읽고, 앞 쓰기의 결과를 이 안에서 이어 붙여 다음 쓰기가 봐요. 거래가 다시 돌면 같은 함수를 다시 불러요(순수 함수)
+        const cur = {};
+        for (const w of list) if (w.merge && !(w.path in cur)) { const s = await tx.get(F.doc(fb.fs, base + w.path)); cur[w.path] = s.exists() ? unpack(s.data()) : null; }
+        return list.map((w) => {
+          const ref = F.doc(fb.fs, base + w.path);
+          let op = w.op, data = w.data, kept = "", lost = null;
+          if (w.merge) {
+            const r = w.merge(cur[w.path]) || { skip: "skip" };
+            if (r.skip) return { skip: r.skip, kept: r.kept || "", lost: r.lost || null };
+            op = r.op; data = r.data; kept = r.kept || ""; lost = r.lost || null;
+            cur[w.path] = op === "set" ? Object.assign({}, data) : cur[w.path] && applied(cur[w.path], data);
+          }
+          if (op === "set") tx.set(ref, prep(data)); else tx.update(ref, prep(data));
+          return { op, data, kept, lost };
+        });
       }, { maxAttempts: 4 });
+    }
+    // 이 거래 안에서 앞 쓰기가 남긴 모양(arrayUnion은 같은 값이 없을 때만 덧붙여요)
+    function applied(d, p) {
+      const o = Object.assign({}, d);
+      Object.keys(p).forEach((k) => {
+        const v = p[k];
+        if (v && v.__append) { const a = Array.isArray(o[k]) ? o[k].slice() : []; v.__append.forEach((x) => { if (!a.some((y) => JSON.stringify(y) === JSON.stringify(x))) a.push(x); }); o[k] = a; }
+        else if (v && v.__delete === true) delete o[k];
+        else o[k] = v;
+      });
+      return o;
     }
     // 휴대폰이 요청을 기다리다 그만둘 때: PC의 답이 먼저 왔으면 그 답을, 아니면 요청을 서버에서 지워요. 거래 하나라서 PC의 승인(held의 req)과
     // 둘 중 하나만 일어나요. live: 서버가 아는 지금 상태(수업이 진행 중인지). 답을 놓쳤어도 실제로 시작된 수업을 실패로 말하지 않게 봐요

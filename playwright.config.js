@@ -12,7 +12,7 @@ const PORT = 3123;
 // 휴대폰 ↔ PC 소식이 늦어 Firebase 시험 하나가 매번 다른 곳에서 시간 초과가 났어요(3번 중 3번). 4개로는 전부 통과하고 걸리는 시간도 같아요(docs/STAGE-SCREEN.md)
 const WORKERS = process.env.CI ? undefined : Math.max(1, Math.min(4, Math.floor(os.cpus().length / 2)));
 const BASE_URL = (process.env.BASE_URL || "").replace(/\/$/, "");
-const FIREBASE = /(rules|realtime|roundtrip|connect|control|library|history|e2e|class-screen|gslides)\.spec\.js$/;
+const FIREBASE = /(rules|realtime|roundtrip|connect|control|library|history|e2e|class-screen|gslides|clock)\.spec\.js$/;
 
 export default defineConfig({
   testDir: "tests",

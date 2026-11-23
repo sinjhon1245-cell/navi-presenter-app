@@ -1,0 +1,376 @@
+// 수업 내비 1단계-1 Firestore 보안 규칙
+// 배포: 전용 프로젝트 navi-presenter-fd289에만, 교사 승인 뒤(firebase deploy --only firestore:rules). 설계는 docs/STAGE1-1-REALTIME.md
+// 원칙(2026-11-11, docs/AUTH-POLICY.md): 구글 계정으로 가입한 교사는 운영자 승인 없이 teachers/{자기 UID} 아래만 읽고 쓴다.
+// 다른 교사의 자리는 읽지도 쓰지도 못한다. 구글이 아닌 로그인(익명 · 이메일 등)은 자기 UID 자리라도 못 쓴다.
+// PIN · 세션 이름을 알아도 그 교사가 아니면 거절. 그 밖은 모두 막는다. (예전 시범 교사 목록 allowed/{UID}는 쓰지 않는다)
+// 학생 정보는 들어가지 않는다(반 이름 · 인원 수 · 교사의 신호등 판단 · 질문 메모 120자).
+// 시험: tests/rules.spec.js(Firebase 에뮬레이터). 칸 이름을 바꾸면 앱(public/index.html의 lessonDeck · newDeck · defaultC · blankS)과 함께 바꾼다.
+// PIN 4자리로 연결(docs/UX-1-1.md 9): PIN만으로는 아무것도 열리지 않는다. PIN은 교사 PC가 ‘휴대폰 연결’을 연 동안(3분)
+// 그 교사 한 명이 잠깐 맡는 자리(pins/{PIN})일 뿐이고, 휴대폰은 거기에 요청 하나만 남긴다(기다리는 요청은 3개까지, 거절하면 비어요).
+// 교사 PC가 허용한 휴대폰(익명 로그인) 한 대만, teachers/{교사}/devices/{그 휴대폰}이 있고 · 시간이 남았고 ·
+// 허용받은 그 수업(run)이 아직 PC의 수업일 때만 읽는다. 수업 문서는 직접 쓰지 못하고 명령(cmds/{휴대폰})만 남긴다. 교사 PC가 검증해 적용한다.
+// 이 부분은 실제 프로젝트에 교사 승인 뒤에만 배포한다.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 수업 내비는 구글 로그인만 써요. 다른 방식(익명 · 이메일 등)으로 로그인한 계정은 자기 UID 자리라도 읽고 쓰지 못해요
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    function isGoogle() {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    // 자유 가입이라 PIN 자리를 여러 개 맡아 두는 일을 막는다: 한 계정은 자기 설정(lessons/settings)에 적힌 PIN 자리만 열거나 다시 연다.
+    // 앱은 PIN을 바꿀 때 설정을 먼저 저장하고 그 PIN을 연다(public/index.html changePin → holdPin). 읽기 하나로 세어진다
+    function myPin(p) {
+      let s = /databases/$(database)/documents/teachers/$(request.auth.uid)/lessons/settings;
+      return exists(s) && get(s).data.get('pin', '') == p;
+    }
+    function isAnon() {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+    // PIN 4자리 연결 스위치(2026-11-15, docs/PRODUCTION-ACTIVATION.md): 관리자만 콘솔에서 만드는 config/pin { on: true }가 있을 때만
+    // PIN 경로(자리 열기 · 읽기 · 휴대폰의 요청 · 휴대폰 허용)가 열린다. 1차 정식 활성화는 구글 계정만(앱 pin: false)이라 이 문서를 두지 않아,
+    // 앱이 PIN을 쓰지 않는 동안 서버의 PIN 권한도 닫혀 있다(최소 권한). 나중에 PIN을 켤 때는 규칙을 다시 배포하지 않고 이 문서만 만든다
+    function pinOn() {
+      let c = /databases/$(database)/documents/config/pin;
+      return exists(c) && get(c).data.get('on', false) == true;
+    }
+    // 교사 PC가 허용한 휴대폰: 기기 문서가 있고, 끝나는 시각 전
+    function devicePath(uid) {
+      return /databases/$(database)/documents/teachers/$(uid)/devices/$(request.auth.uid);
+    }
+    function dev(uid) {
+      return get(devicePath(uid)).data;
+    }
+    function isDevice(uid) {
+      return isAnon() && exists(devicePath(uid)) && dev(uid).exp > request.time.toMillis();
+    }
+    function hubPath(uid) {
+      return /databases/$(database)/documents/teachers/$(uid)/lessons/hub;
+    }
+    // 허용받은 수업(run)이 아직 교사 PC가 준비하거나 가르치는 수업일 때만. 수업이 끝나거나 PC가 새로 열리면 run이 바뀌어
+    // PC가 기기 문서를 지우지 못하고 꺼졌어도(강제 종료 · 인터넷 끊김) 그 휴대폰은 다음 수업에 들어오지 못한다
+    function inRun(uid) {
+      return isDevice(uid) && exists(hubPath(uid)) && get(hubPath(uid)).data.get('run', '') == dev(uid).run;
+    }
+    function pinPath(p) {
+      return /databases/$(database)/documents/pins/$(p);
+    }
+    function askPath(p) {
+      return /databases/$(database)/documents/pins/$(p)/asks/$(request.auth.uid);
+    }
+    // PIN 자리에는 교사 id를 그대로 두지 않고 SHA-256(교사 id)만 둔다(누구나 하나씩 읽는 문서라서). 규칙이 직접 계산해 맞춰 본다
+    function myHash() {
+      return hashing.sha256(request.auth.uid).toHexString().lower();
+    }
+
+    // 선택 칸: 없거나(null 포함), 있으면 그 자료형 · 길이
+    function optString(d, k, max) {
+      return !(k in d) || d[k] == null || (d[k] is string && d[k].size() <= max);
+    }
+    function optNumber(d, k) {
+      return !(k in d) || d[k] == null || d[k] is number;
+    }
+    function optBool(d, k) {
+      return !(k in d) || d[k] is bool;
+    }
+    function optList(d, k, max) {
+      return !(k in d) || (d[k] is list && d[k].size() <= max);
+    }
+
+    // 세션 문서에 올 수 있는 칸. 개수 상한은 앱(80 · 40 · 80)보다 넉넉하게, 지나치게 커지는 것만 막는다
+    // vid(2026-11-12, docs/VIDEO.md 1-1): 이번 장면 방문에서 장면 영상을 틀었거나 틀어 달라고 했다는 표시({ k: 's:장면 id', at }).
+    // 영상 장면의 ‘다음’ 두 단계(첫 다음 = 재생, 둘째 = 다음 장면)를 휴대폰도 알게 해요. 장면이 바뀌면 null
+    function validSession(d) {
+      return d.keys().hasOnly(['v', 'started', 'ended', 'cur', 't0', 'enteredAt', 'log', 'reactions', 'qs', 'used', 'tv', 'blank', 'tool', 'memoId', 'at', 'run', 'vid'])
+        && (!('vid' in d) || d.vid == null || (d.vid is map && d.vid.keys().hasOnly(['k', 'at']) && d.vid.k is string && d.vid.k.size() <= 120 && d.vid.at is number))
+        && optString(d, 'run', 64)
+        && optList(d, 'log', 300)
+        && optList(d, 'reactions', 300)
+        && optList(d, 'qs', 120)
+        && optList(d, 'used', 200);
+    }
+
+    // 지금 수업 내용(lessons/deck): 예시 수업(lessonDeck) · 올린 파일 수업(newDeck)이 쓰는 칸만.
+    // 장면(pages) · 수업 자료(res) 안쪽은 수업마다 달라서 목록 크기만 봐요(문서 하나는 Firestore가 1MiB로 막아요)
+    // kind 'mine' = 교사가 만든 수업(내 수업, myId · 예시에서 복제했으면 from)
+    function validDeck(d) {
+      return d.keys().hasOnly(['v', 'kind', 'lessonId', 'key', 'oldKeys', 'title', 'tag', 'grade', 'subject', 'total', 'pages', 'res', 'prep', 'srcLink', 'myId', 'from', 'file'])
+        && deckFields(d);
+    }
+    // 칸 목록 밖의 검사(지금 수업 · 내 수업이 함께 써요)
+    function deckFields(d) {
+      return d.keys().hasAll(['v', 'kind', 'title', 'pages', 'res'])
+        && d.v is int
+        && d.kind in ['example', 'pdf', 'pptx', 'mine']
+        && optString(d, 'myId', 40)
+        && optString(d, 'from', 100)
+        && d.title is string && d.title.size() <= 200
+        && d.pages is list && d.pages.size() <= 100
+        && d.res is list && d.res.size() <= 400
+        && optString(d, 'lessonId', 100)
+        && optString(d, 'key', 300)
+        && optString(d, 'tag', 300)
+        && optString(d, 'subject', 40)
+        && optString(d, 'srcLink', 1000)
+        && optList(d, 'oldKeys', 20)
+        && optNumber(d, 'grade')
+        && optNumber(d, 'total')
+        && (!('prep' in d) || d.prep in ['ai', 'basic'])
+        && validFile(d);
+    }
+    // 파일에서 만든 수업(2026-11-11, docs/LOCAL-FILES.md): 그 파일의 id · 종류 · 이름만. 파일 자체는 교사 PC 브라우저(IndexedDB)에만 있어요
+    function validFile(d) {
+      return !('file' in d) || (d.file is map && d.file.keys().hasOnly(['fid', 'kind', 'name'])
+        && d.file.fid is string && d.file.fid.matches('f-[0-9a-f]{32}')
+        && d.file.kind in ['pdf', 'pptx']
+        && d.file.name is string && d.file.name.size() <= 120);
+    }
+
+    // 설정(lessons/settings): 앱의 발표 설정(defaultC)이 쓰는 칸만. PIN은 숫자 4자리, 반 이름은 짧게, 인원 수는 1–40
+    function validSettings(d) {
+      return d.keys().hasOnly(['v', 'monitor', 'presenter', 'strength', 'reactions', 'ai', 'theme', 'palette', 'pin', 'className', 'classSize',
+          'fontSize', 'showConcepts', 'showNotes', 'showNext', 'pace', 'tapNav', 'liveTone'])
+        && d.pin is string && d.pin.matches('[0-9]{4}')
+        && optNumber(d, 'v')
+        && optString(d, 'className', 40)
+        && (!('classSize' in d) || (d.classSize is int && d.classSize >= 1 && d.classSize <= 40))
+        && optString(d, 'monitor', 20)
+        && optString(d, 'strength', 10)
+        && optString(d, 'theme', 10)
+        && optString(d, 'palette', 20)
+        && optString(d, 'fontSize', 10)
+        && optString(d, 'liveTone', 10)
+        && optBool(d, 'presenter') && optBool(d, 'reactions') && optBool(d, 'ai')
+        && optBool(d, 'showConcepts') && optBool(d, 'showNotes') && optBool(d, 'showNext')
+        && optBool(d, 'pace') && optBool(d, 'tapNav');
+    }
+
+    // 교사 PC의 준비 상태(lessons/hub): PC가 상태가 바뀔 때만 쓰고, 휴대폰은 읽고 ‘수업 시작’ 요청(startReq)만 남긴다
+    function validHub(d) {
+      return d.keys().hasOnly(['v', 'on', 'pc', 'run', 'stage', 'title', 'scenes', 'offer', 'live', 'at', 'startReq', 'startAck', 'ping', 'pong'])
+        && optNumber(d, 'v') && optNumber(d, 'scenes') && optNumber(d, 'at') && optString(d, 'run', 64)
+        && optBool(d, 'on') && optBool(d, 'stage') && optBool(d, 'offer') && optBool(d, 'live')
+        && optString(d, 'pc', 40) && optString(d, 'title', 200)
+        && (!('startReq' in d) || d.startReq == null || (d.startReq is map && d.startReq.keys().hasOnly(['id', 'at', 'pc'])))
+        && (!('startAck' in d) || d.startAck == null || (d.startAck is map && d.startAck.keys().hasOnly(['id', 'ok', 'why', 'at'])))
+        && (!('ping' in d) || d.ping == null || (d.ping is map && d.ping.keys().hasOnly(['id', 'at'])))
+        && (!('pong' in d) || d.pong == null || (d.pong is map && d.pong.keys().hasOnly(['id', 'at'])));
+    }
+    // 휴대폰의 명령 목록(cmds/{휴대폰}): 최근 것 몇 개만. 안쪽(넘기기 · 신호 …)은 교사 PC가 하나씩 검증해 적용한다
+    function validCmd(d, v) {
+      return d.keys().hasOnly(['sid', 'run', 'q', 'at', 'done', 'no'])
+        && d.sid == v.sid && d.run == v.run
+        && d.q is list && d.q.size() <= 10
+        && d.at is number && optNumber(d, 'done') && optNumber(d, 'no');
+    }
+    // 허용한 휴대폰(devices/{휴대폰}): 그 수업 하나, 길어야 4시간
+    function validDevice(d) {
+      return d.keys().hasOnly(['sid', 'run', 'exp', 'at'])
+        && d.sid is string && d.sid.matches('s[0-9]{4}')
+        && d.run is string && d.run.size() >= 16 && d.run.size() <= 64
+        && d.exp is number && d.exp <= request.time.toMillis() + 4 * 3600 * 1000
+        && optNumber(d, 'at');
+    }
+    // PIN 자리(pins/{PIN}): 그 PIN의 수업(s{PIN}) 하나, 연 교사의 해시(owner)로, 길어야 5분(앱은 3분). lease는 열 때마다 새 난수.
+    // asks: 받은 요청 수(한 번 열 때 20개까지) · no: 교사가 거절한 수. 답을 기다리는 요청(asks - no)은 3개까지
+    function validPin(p, d) {
+      return d.keys().hasOnly(['owner', 'sid', 'lease', 'exp', 'open', 'asks', 'no'])
+        && d.owner == myHash()
+        && d.sid == 's' + p
+        && d.lease is string && d.lease.size() >= 16 && d.lease.size() <= 64
+        && d.exp is number && d.exp <= request.time.toMillis() + 5 * 60 * 1000
+        && d.open is bool && d.asks is int && d.no is int;
+    }
+    // 새로 열기: 열림 · 요청 0개 · 거절 0개
+    function freshPin(p) {
+      return validPin(p, request.resource.data) && request.resource.data.open == true
+        && request.resource.data.asks == 0 && request.resource.data.no == 0;
+    }
+    // 내 수업 하나(decks/{수업 id}, 2026-11-11 docs/MY-LESSONS.md): 지금 수업 문서와 같은 모양 + 고친 시각(at) · 만든 시각(made).
+    // 문서 id와 myId가 같아야 하고, 장면은 1개 이상(빈 수업은 없어요) 100개까지
+    function validMine(id, d) {
+      return d.keys().hasOnly(['v', 'kind', 'key', 'oldKeys', 'title', 'tag', 'grade', 'subject', 'total', 'pages', 'res', 'prep', 'srcLink', 'myId', 'from', 'file', 'at', 'made'])
+        && deckFields(d)
+        && d.kind == 'mine' && d.myId == id
+        && d.pages.size() >= 1
+        && optNumber(d, 'at') && optNumber(d, 'made');
+    }
+    // 표시 이름: 1–40자. 학교명은 넣지 않아도 되고(선택), 넣으면 60자까지
+    function validProfile(d) {
+      return d.keys().hasOnly(['v', 'name', 'school', 'at'])
+        && d.name is string && d.name.size() >= 1 && d.name.size() <= 40
+        && optString(d, 'school', 60) && optNumber(d, 'v') && optNumber(d, 'at');
+    }
+    // 수업 기록(records/{r-…}, 2026-11-12 docs/RECORDS.md): 교사의 수업 관찰 기록 한 번(수업 시작 시각으로 만든 id).
+    // 장면별 시간 · 마지막 신호(학급 전체에 대한 교사의 판단) · 질문 메모 · 다시 지도할 것 · 교사 메모 · 보여 준 자료. 학생 정보 칸은 없다
+    function validRecord(d) {
+      return d.keys().hasOnly(['v', 'key', 'title', 'grade', 'subject', 'cls', 'startAt', 'endAt', 'at', 'totalSec', 'plannedMin', 'scenes', 'sig',
+          'questions', 'again', 'text', 'used', 'usedTitles', 'events', 'trashedAt', 'editedAt', 'from', 'src'])
+        && d.v is int && d.v >= 3
+        && d.title is string && d.title.size() <= 200
+        && optString(d, 'key', 300) && optString(d, 'subject', 40) && optString(d, 'cls', 60) && optString(d, 'text', 2000)
+        && optString(d, 'from', 100) && optString(d, 'src', 10)
+        && (!('grade' in d) || d.grade == null || d.grade is number)
+        && d.endAt is number && d.at is number && (!('startAt' in d) || d.startAt == null || d.startAt is number)
+        && d.totalSec is number && optNumber(d, 'plannedMin')
+        && d.scenes is list && d.scenes.size() <= 120
+        && d.sig is map && d.sig.keys().hasOnly(['red', 'yellow', 'green'])
+        && optList(d, 'questions', 40) && optList(d, 'again', 40) && optList(d, 'used', 200) && optList(d, 'usedTitles', 40) && optList(d, 'events', 100)
+        && (!('trashedAt' in d) || d.trashedAt == null || d.trashedAt is number)
+        && (!('editedAt' in d) || d.editedAt == null || d.editedAt is number);
+    }
+    // 휴지통에 넣은 시각은 그 일을 한 시각(서버 시계 ± 10분)이라야 30일을 바르게 센다. 되살리기(null)와 그대로 두기는 언제나 된다
+    function trashTime(n, o) {
+      return n.get('trashedAt', null) == null || n.get('trashedAt', null) == o.get('trashedAt', null)
+        || (n.trashedAt is number && n.trashedAt > request.time.toMillis() - 600000 && n.trashedAt < request.time.toMillis() + 600000);
+    }
+    // 휴대폰의 연결 요청: 그 자리의 lease · 누른 시각 · 기기 종류(‘iPhone’처럼 짧게)만. 학생 정보는 없다
+    function validAsk(d) {
+      return d.keys().hasOnly(['lease', 'at', 'kind'])
+        && d.lease is string && d.at is number && optString(d, 'kind', 20);
+    }
+
+    match /teachers/{uid} {
+      allow read, write: if false;
+
+      // 지금 수업 내용(lessons/deck) · 설정(lessons/settings) · PC 준비 상태(lessons/hub). 교사 PC가 쓰고 휴대폰은 읽는다
+      match /lessons/{name} {
+        allow read: if isOwner(uid) || (name in ['deck', 'settings', 'hub'] && inRun(uid));
+        allow create, update: if isOwner(uid)
+          && ((name == 'deck' && validDeck(request.resource.data))
+            || (name == 'settings' && validSettings(request.resource.data))
+            || (name == 'hub' && validHub(request.resource.data)));
+        // PIN으로 연결한 휴대폰은 ‘수업 시작’ 요청과 ‘PC 응답 확인’ 칸만 바꿀 수 있다(시작은 교사 PC가 한다)
+        allow update: if name == 'hub' && inRun(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['startReq', 'ping'])
+          && validHub(request.resource.data);
+        allow delete: if false;
+      }
+
+      // 수업 진행 상태(sessions/s{수업 번호}). PIN 휴대폰은 허용받은 그 수업(run)만 읽고, 쓰지는 못한다
+      match /sessions/{sid} {
+        allow read: if isOwner(uid) || (inRun(uid) && dev(uid).sid == sid && resource.data.get('run', '') == dev(uid).run);
+        allow create, update: if isOwner(uid) && sid.matches('s[0-9]{4}') && validSession(request.resource.data);
+        allow delete: if false;
+      }
+
+      // PIN 휴대폰의 명령: 자기 문서 하나에만, 허용받은 그 수업으로만. 교사 PC는 읽고 ‘처리함(done) · 거절(no)’만 적는다
+      match /cmds/{phone} {
+        allow read: if isOwner(uid) || (request.auth != null && request.auth.uid == phone && inRun(uid));
+        allow create: if request.auth != null && request.auth.uid == phone && inRun(uid)
+          && validCmd(request.resource.data, dev(uid)) && request.resource.data.keys().hasOnly(['sid', 'run', 'q', 'at']);
+        allow update: if request.auth != null && request.auth.uid == phone && inRun(uid)
+          && validCmd(request.resource.data, dev(uid)) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sid', 'run', 'q', 'at']);
+        allow update: if isOwner(uid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['done', 'no'])
+          && optNumber(request.resource.data, 'done') && optNumber(request.resource.data, 'no');
+        allow delete: if isOwner(uid);
+      }
+
+      // 교사 PC가 허용한 휴대폰. 교사만 만들고 지운다(수업 끝 · 연결 끊기)
+      match /devices/{phone} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if pinOn() && isOwner(uid) && validDevice(request.resource.data);
+      }
+
+      // 내 수업(여러 개): 본인만 읽고 쓰고 지운다. PIN 휴대폰은 못 읽는다(휴대폰은 지금 수업 lessons/deck만 읽어요).
+      // 수업 id는 앱이 만드는 m-(16진수 16자리)
+      match /decks/{id} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && id.matches('m-[0-9a-f]{16}') && validMine(id, request.resource.data);
+      }
+
+      // 수업 기록(2026-11-12, docs/RECORDS.md): 본인만 읽고 쓴다(다른 교사 · PIN 휴대폰 · 로그인 안 함은 못 본다).
+      // 만들 때는 휴지통이 아닌 기록만. 고칠 수 있는 것은 교사 메모 · 다시 지도할 것 · 질문 메모 · 휴지통 표시뿐이고(같은 내용을 다시 쓰는 것은 된다),
+      // 지우는 것(영구 삭제)은 휴지통에 들어간 지 30일이 지난 기록만이다
+      match /records/{id} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) && id.matches('r-[0-9a-z]{4,24}') && validRecord(request.resource.data)
+          && request.resource.data.get('trashedAt', null) == null;
+        allow update: if isOwner(uid) && validRecord(request.resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'again', 'questions', 'trashedAt', 'editedAt'])
+          && trashTime(request.resource.data, resource.data);
+        allow delete: if isOwner(uid) && resource.data.get('trashedAt', null) is number
+          && resource.data.trashedAt < request.time.toMillis() - 30 * 24 * 3600 * 1000;
+      }
+
+      // 교사의 표시 이름(profile/me): 처음 로그인할 때 정한다. 본인만 읽고 쓴다(PIN 휴대폰도 못 읽는다)
+      match /profile/{name} {
+        allow read: if isOwner(uid) && name == 'me';
+        allow create, update: if isOwner(uid) && name == 'me' && validProfile(request.resource.data);
+        allow delete: if false;
+      }
+    }
+
+    // PIN 자리: 한 PIN은 한 번에 한 교사만 맡는다(같은 PIN을 쓰는 다른 교사의 수업과 섞이지 않게).
+    // 들어 있는 것은 교사 해시 · 수업 이름(s{PIN}) · lease · 끝나는 시각 · 요청 수뿐이라(교사 id 없음), 로그인한 누구나 하나씩은 읽을 수 있다(목록은 아무도 못 본다)
+    match /pins/{p} {
+      allow get: if pinOn() && request.auth != null;
+      allow list, delete: if false;
+      // 열기 · 다시 열기는 자기 설정의 PIN만(myPin): 한 계정이 여러 PIN 자리를 맡아 두지 못한다
+      allow create: if pinOn() && isGoogle() && p.matches('[0-9]{4}') && freshPin(p) && myPin(p);
+      // 다시 열기(새 lease): 내 자리이거나, 남의 자리라도 닫혔거나 시간이 지났을 때만
+      allow update: if pinOn() && isGoogle() && freshPin(p) && myPin(p) && request.resource.data.lease != resource.data.lease
+        && (resource.data.owner == myHash() || resource.data.open == false || resource.data.exp <= request.time.toMillis());
+      // 닫기: 맡은 교사만
+      allow update: if pinOn() && isGoogle() && resource.data.owner == myHash()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['open']) && request.resource.data.open == false;
+      // 거절 하나: 맡은 교사가 요청에 ‘거절’을 적으며 거절 수를 하나 올린다. 그만큼 기다리는 자리가 다시 비어서,
+      // 모르는 요청이 자리를 채워도 교사가 거절하면 내 휴대폰이 들어올 수 있다
+      allow update: if pinOn() && isGoogle() && resource.data.owner == myHash()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['no'])
+        && request.resource.data.no == resource.data.no + 1 && request.resource.data.no <= resource.data.asks;
+      // 휴대폰(익명)은 자기 요청 하나를 남기며 요청 수를 하나 올린다: 열려 있고 · 시간 전이고 · 기다리는 요청이 3개 미만이고 ·
+      // 한 번 연 동안 20개 미만이고 · 이 lease에 처음이고 · 이 PIN에서 거절된 휴대폰이 아닐 때만
+      allow update: if pinOn() && isAnon()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['asks'])
+        && resource.data.open == true && resource.data.exp > request.time.toMillis()
+        && resource.data.asks < 20 && resource.data.asks - resource.data.no < 3
+        && request.resource.data.asks == resource.data.asks + 1
+        && getAfter(askPath(p)).data.lease == resource.data.lease
+        && (!exists(askPath(p)) || (get(askPath(p)).data.lease != resource.data.lease && get(askPath(p)).data.get('no', false) != true));
+
+      match /asks/{phone} {
+        function pin() {
+          return get(pinPath(p)).data;
+        }
+        function mine() {
+          return isAnon() && request.auth.uid == phone;
+        }
+        // 요청 수를 함께 올리는 같은 한 번의 쓰기여야 한다(그래서 자리마다 3개를 넘지 못한다)
+        function counted() {
+          return validAsk(request.resource.data) && request.resource.data.lease == pin().lease
+            && getAfter(pinPath(p)).data.asks == pin().asks + 1;
+        }
+        allow get: if pinOn() && request.auth != null && request.auth.uid == phone;
+        // 교사는 지금 lease의 요청만 본다(앞서 이 PIN을 맡았던 다른 교사의 요청은 못 본다)
+        allow read: if pinOn() && isGoogle() && pin().owner == myHash() && resource.data.lease == pin().lease;
+        allow create: if pinOn() && mine() && counted();
+        // 지난 lease에 남은 내 요청 자리에 새로 요청(거절된 적이 있으면 안 된다. 앱은 거절되면 새 익명 계정으로 다시 요청해요)
+        allow update: if pinOn() && mine() && resource.data.lease != pin().lease && resource.data.get('no', false) != true && counted();
+        // 휴대폰의 ‘취소’와 다시 요청(같은 lease 안에서는 요청 수가 늘지 않는다). 교사가 답한 뒤에는 못 바꾼다
+        allow update: if pinOn() && mine() && resource.data.lease == pin().lease
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['gone', 'at'])
+          && request.resource.data.gone is bool && request.resource.data.at is number
+          && !('ok' in resource.data) && !('no' in resource.data);
+        // 교사의 답: 지금 lease의 요청에만. 거절은 언제나, 허용은 자리가 열려 있고 시간 전일 때 자기 이름 · 그 PIN의 수업으로만
+        allow update: if pinOn() && isGoogle() && pin().owner == myHash() && resource.data.lease == pin().lease
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ok', 'no', 'teacher', 'sid'])
+          && !('ok' in resource.data) && !('no' in resource.data)
+          && ((request.resource.data.get('no', false) == true && !('ok' in request.resource.data))
+            || (request.resource.data.get('ok', false) == true && !('no' in request.resource.data)
+              && request.resource.data.get('teacher', '') == request.auth.uid && request.resource.data.get('sid', '') == pin().sid
+              && pin().open == true && pin().exp > request.time.toMillis() && resource.data.get('gone', false) == false));
+        allow delete: if false;
+      }
+    }
+
+    // PIN 스위치(config/pin): 앱 · 휴대폰 누구도 읽거나 쓰지 못한다. 관리자만 콘솔에서 만들고 지운다(규칙의 get()은 이 규칙과 상관없이 읽어요)
+    match /config/{name} {
+      allow read, write: if false;
+    }
+  }
+}

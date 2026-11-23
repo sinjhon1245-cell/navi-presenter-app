@@ -101,6 +101,11 @@ const consent = async (page, o) => {
   if (o && o.auto) await ask.getByRole("checkbox", { name: /다음부터는 묻지 않고/ }).check();
   await ask.getByRole("button", { name: "동의하고 바꾸기" }).click();
 };
+// 이번 시험의 n번째 Google 변환이 끝날 때까지(2026-11-24, CI 45192119440): 앞 변환의 성공 문구(‘Google Slides로 바꾼 원래 모양 …’)는
+// 내 수업 탭에도 그대로 남고 그 수업에는 `.words-only`가 없어서, 문구 · `.words-only` 0개만 보면 다음 PPTX를 열기도 전에 통과할 수 있어요
+// (파일 처리가 0.3초만 늦어도 3번 중 3번 그랬어요). 그래서 가짜 Google에서 n번째 Slides 파일이 휴지통으로 가는 것(장을 다 가져온 다음)을 먼저 기다려요.
+// 실패해도 휴지통으로 가니, 성공인지는 그 뒤 문구로 따로 봐요
+const gsTrashed = (g, n) => expect.poll(() => g.files.filter((f) => f.mimeType === "application/vnd.google-apps.presentation" && f.trashed).length, { timeout: 30000 }).toBe(n);
 
 test("동의 전에는 Google로 아무것도 가지 않고, 동의하면 원래 모양(노트 그대로) · 변환 파일은 바로 휴지통 · PDF 사본만 Drive에. 계정에는 Drive id가 없고, 발표 설정에서 휴지통으로", async ({ browser }) => {
   const errors = [], g = fakeGoogle();
@@ -168,6 +173,7 @@ test("‘바로 바꾸기’: 처음 한 번 동의하면 다음 PPTX는 올리�
   // 다음 PPTX: 올리기만 하면 바뀌어요(글자만 수업이 생기자마자 이어서)
   await page.getByRole("tab", { name: "내 수업" }).click();
   await page.locator("#pdf-in").setInputFiles(fixture("lesson.pptx"));
+  await gsTrashed(g, 2);
   await expect(page.getByText("Google Slides로 바꾼 원래 모양 3장을 넣었어요")).toBeVisible({ timeout: 30000 });
   await expect(page.locator(".words-only")).toHaveCount(0);
   expect(g.files).toHaveLength(2);
@@ -508,7 +514,10 @@ test("동의 창이 열린 동안 화면이 다시 그려져도 ‘다음부터�
   await expect(page.getByText("Drive에는 아무것도 남기지 않았어요")).toBeVisible({ timeout: 30000 });
   await page.getByRole("tab", { name: "내 수업" }).click();
   await page.locator("#pdf-in").setInputFiles(fixture("lesson.pptx"));
+  // 위 시험과 같은 앞 문구가 남아 있어요: 두 번째 변환이 끝난 뒤에 봐요
+  await gsTrashed(g, 2);
   await expect(page.getByText("Google Slides로 바꾼 원래 모양 3장을 넣었어요")).toBeVisible({ timeout: 30000 });
   await expect(page.locator(".words-only")).toHaveCount(0);
+  expect(g.files).toHaveLength(2);
   expect(errors.filter((e) => !/offline|연결/.test(e))).toEqual([]);
 });
