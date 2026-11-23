@@ -326,7 +326,7 @@
     // db.append(…)로 만든 값은 서버에서 배열 끝에 덧붙여요(arrayUnion). 두 기기가 같은 순간 눌러도 둘 다 남아요
     const prep = (o) => {
       const out = {};
-      Object.keys(o).forEach((k) => { const v = o[k]; out[k] = v && v.__append ? F.arrayUnion.apply(null, v.__append.map((x) => pack(x, true))) : pack(v, false); });
+      Object.keys(o).forEach((k) => { const v = o[k]; out[k] = v && v.__append ? F.arrayUnion.apply(null, v.__append.map((x) => pack(x, true))) : v && v.__delete === true ? F.deleteField() : pack(v, false); });
       return out;
     };
     // 따라가는 기기(휴대폰)의 조작은 ‘조건부’로 보내요(update(p, { base })):
@@ -448,6 +448,7 @@
       Object.keys(p).forEach((k) => {
         const v = p[k];
         if (v && v.__append) { const a = Array.isArray(o[k]) ? o[k].slice() : []; v.__append.forEach((x) => { if (!a.some((y) => JSON.stringify(y) === JSON.stringify(x))) a.push(x); }); o[k] = a; }
+        else if (v && v.__delete === true) delete o[k];
         else o[k] = v;
       });
       return o;

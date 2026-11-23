@@ -1594,7 +1594,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // clkBase: the site's clock − this window's class clock when the class started (the holder checks a jump forward against it).
   // byOff: the t0 of a class whose writes go without by (rules that do not know it yet). clkHeld: a PC write the class went past while it was cut off
   let clkSamples = [], clkSkip = true, clkSeenAt = null, clkT0 = null, clkPc = "", clkBase = null, clkWarn = false, clkHeld = null, byOff = null;
-  let clkWall = Date.now(), clkMono = performance.now(), clkBusy = false, clkTried = -1e9;
+  let clkWall = Date.now(), clkMono = performance.now(), clkBusy = false, clkTried = -1e9, clkVerifying = false;
   const clkLead = () => isHub() && holds();
   function clkTake(v) {
     if (!(Math.abs(v) < CLK_MAX) || clkLead()) return;
@@ -1635,15 +1635,18 @@ button.pchip { cursor: pointer; font-family: inherit; }
     else if (drift > CLK_JUMP) {
       if (!clkLead()) { clkSamples = []; return; }
       if (!S.started || S.ended || rehearsing) return;
+      // until the site's clock answers, this window's writes go without a sample (by: null): a jumped time must not reach the phones
       const t0 = S.t0;
+      clkVerifying = true;
       clkHead().then((t) => {
+        clkVerifying = false;
         if (S.t0 !== t0) return;
         const dd = !clkBase || clkBase.t0 !== t0 ? null : (t - now()) - clkBase.d;
         if (dd !== null && Math.abs(dd) <= CLK_SURE) clkWarn = false;
         else if (dd !== null && Math.abs(dd + drift) <= CLK_SURE) { clockOff += drift; clkWarn = false; saveRun(); }
         else clkWarn = true;
         render();
-      }, () => { if (S.t0 === t0) { clkWarn = true; render(); } });
+      }, () => { clkVerifying = false; if (S.t0 === t0) { clkWarn = true; render(); } });
     }
   }
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
@@ -2042,11 +2045,12 @@ button.pchip { cursor: pointer; font-family: inherit; }
   function sendOwn(path, op, data, view, prev) {
     if (!guardOn() || !isHub()) {
       const r = db.doc(path);
-      (op === "set" ? r.set(data) : r.update(data)).catch(() => { if (op !== "set" && /^sessions\//.test(path) && refS) refS.set(clone(S)).catch(() => {}); });
+      (op === "set" ? r.set(data) : r.update(data)).catch(() => { if (op !== "set" && /^sessions\//.test(path) && refS) { const o = clone(S); delete o.by; refS.set(o).catch(() => {}); } });
       return;
     }
     if (ctl === "other" || (ctl === "free" && liveClass())) return;
-    ownQ.push({ path, op, data, view: view || null, prev: prev || null, t0: prev ? prev.t0 : data && data.t0, q: performance.now() });
+    // jumped: made while a jump of this window's clock was still being checked, so its time may be the jumped one (no sample)
+    ownQ.push({ path, op, data, view: view || null, prev: prev || null, t0: prev ? prev.t0 : data && data.t0, q: performance.now(), jumped: clkVerifying });
     if (ctl === "mine") ownKick();
     else if (ctl === "free") wantHub().catch(() => {});
   }
@@ -2078,8 +2082,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       if (c === "lost") { lostHub(); return; }
       if (c === "hub-denied") { hubOff = true; ownFlush(); render(); return; }
       // rules that do not know by yet (the app came before them): this class goes on without it
-      const sw = part.find((x) => /^sessions\//.test(x.path));
-      if (c === "permission-denied" && sw && (byOff === null || byOff !== sw.t0)) { byOff = sw.t0; ownKick(); return; }
+      if (c === "permission-denied" && part.length === 1 && /^sessions\//.test(part[0].path) && (byOff === null || byOff !== part[0].t0)) { byOff = part[0].t0; ownKick(); return; }
       if (OWN_RETRY.includes(c)) { ownTimer = setTimeout(ownKick, 2000); return; }
       // the server refused a write (too big, a field the rules do not take): only that write goes, never the ones behind it
       if (part.length > 1) { ownSolo = true; ownKick(); return; }
@@ -2091,7 +2094,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // a class write goes with by (this window wrote it, now) and is matched with the class on the server in the same transaction
   const ownWrite = (x) => /^sessions\//.test(x.path) ? Object.assign({}, x, { merge: ownMerge(x) }) : x;
   const sceneKey = (s) => [s.cur || "", s.enteredAt || 0, (s.log || []).length].join("|");
-  const sameVal = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+  const stable = (v) => v === undefined || v === null ? "null" : Array.isArray(v) ? "[" + v.map(stable).join(",") + "]"
+    : typeof v === "object" ? "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + stable(v[k])).join(",") + "}" : JSON.stringify(v);
+  const sameVal = (a, b) => stable(a) === stable(b);
   const ADDS = ["reactions", "qs", "used", "memoId"], ONTV = ["tv", "blank", "tool"];
   // A write made while this PC was cut off can reach a class that moved on (a phone kept steering). Pure: the transaction may run it again.
   // Moving a scene or ending: only if the server's scene is still the one this PC moved from (else kept: the teacher is told).
@@ -2099,30 +2104,38 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // at goes past the server's; by = { pc, at } only for a write sent at once (a late one would make the phones' clock late)
   function ownMerge(x) {
     return (d) => {
-      const p = x.data, on = byOff === null || byOff !== x.t0, quick = performance.now() - x.q < CLK_SURE;
-      const by = (at) => on && typeof at === "number" ? { by: quick ? { pc: tabId, at } : null } : {};
-      if (x.op === "set") { const o = Object.assign({}, p); delete o.by; return { op: "set", data: Object.assign(o, by(o.at)) }; }
+      const p = x.data, on = byOff === null || byOff !== x.t0, quick = performance.now() - x.q < CLK_SURE && !x.jumped && !clkVerifying;
+      // own: at is this window's own clock (an at pushed past the server's came from another device's clock, so it is no sample).
+      // Without by (rules that do not know it), a by the class still has is taken off, so the write fits those rules
+      const by = (at, own) => !on ? (d && "by" in d ? { by: { __delete: true } } : {}) : typeof at === "number" ? { by: quick && own ? { pc: tabId, at } : null } : {};
+      if (x.op === "set") { const o = Object.assign({}, p); delete o.by; return { op: "set", data: Object.assign(o, on && typeof o.at === "number" ? { by: quick ? { pc: tabId, at: o.at } : null } : {}) }; }
       const q = Object.assign({}, p); delete q.by;
-      if (!d || !x.prev || !x.prev.started) return { op: "update", data: Object.assign(q, by(q.at)) };
+      if (!d || !x.prev || !x.prev.started) return { op: "update", data: Object.assign(q, by(q.at, true)) };
       // another class by now (started again, or reset): this write is about a class that is gone
       if (d.t0 !== x.prev.t0 || !d.started) return { skip: "old" };
       const here = sceneKey(d) === sceneKey(x.prev), group = "cur" in p || "ended" in p, out = {}, lost = {};
       let kept = "";
+      // the server already has what this write would make (its answer was lost and it is sent again): nothing to do, nothing to say
+      const already = sceneKey(d) === sceneKey(Object.assign({}, x.prev, q));
       Object.keys(q).forEach((k) => {
         if (k === "at") return;
         if (k === "used") { const u = (Array.isArray(d.used) ? d.used : []).slice(); (q.used || []).forEach((id) => { if (!u.includes(id)) u.push(id); }); out.used = u; }
+        // the record's id goes on a class that has ended (an end that did not count leaves the class running without one)
+        else if (k === "memoId") { if (d.ended) out.memoId = q.memoId; }
         else if (ADDS.includes(k)) out[k] = q[k];
-        else if (!group && here && sameVal(d[k], x.prev[k])) out[k] = q[k];
-        else if (!group && ONTV.includes(k) && q[k]) lost[k] = q[k];
+        else if (group) return;
+        else if (here && sameVal(d[k], x.prev[k])) out[k] = q[k];
+        else if (sameVal(d[k], q[k])) return;
+        else if (ONTV.includes(k) && q[k]) lost[k] = q[k];
       });
       if (group && !("ended" in p && d.ended)) {
         if (here) Object.keys(q).forEach((k) => { if (k !== "at" && !ADDS.includes(k)) out[k] = q[k]; });
-        else kept = "ended" in p ? "end" : "move";
+        else if (!already) kept = "ended" in p ? "end" : "move";
       }
       if (!kept && Object.keys(lost).length) kept = "show";
       if (!Object.keys(out).length) return { skip: kept || "none", kept, lost };
       const at = Math.max(Number(q.at) || 0, (Number(d.at) || 0) + 1);
-      return { op: "update", data: Object.assign(out, { at }, by(at)), kept, lost };
+      return { op: "update", data: Object.assign(out, { at }, by(at, at === Number(q.at))), kept, lost };
     };
   }
   // the class as the server has it, with what this window is still sending on top (after a write the class had gone past)
@@ -2253,12 +2266,14 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (pinDevice() && !rehearsing) return;
     // a PC that does not hold the class changes only its own screen
     if (!rehearsing && isHub() && !holds()) { S = n; render(); return; }
+    if (!rehearsing && clkLead()) clkCheck();
     if (db && !rehearsing) n = Object.assign({}, n, { at: now() }, isHub() && db.pair ? { run: n.run || runId() } : {});
     if ("by" in n) { n = Object.assign({}, n); delete n.by; }
     S = n; if (!rehearsing) { liveS = n; if (refS) { if (isHub()) sendOwn(sessionPath(), "set", clone(n), n); else refS.set(clone(n)).catch(() => {}); } saveRun(); } render();
   }
   // add: items to put at the end of a list on the server too (lights, question notes), so two devices pressing at once both count
   function patchS(p, add) {
+    if (!rehearsing && clkLead()) clkCheck();
     if ("cur" in p && p.cur !== S.cur && S.vid && !("vid" in p)) p = Object.assign({}, p, { vid: null });
     const before = S;
     if (!rehearsing && isHub() && !holds()) { S = Object.assign({}, S, p); render(); return; }
@@ -3191,8 +3206,11 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!S.started || S.ended) return;
     // a phone asks; the PC ends the class and writes the record
     if (db && !isHub() && !rehearsing) { askEnd(); return; }
-    endAsk = false; lastNudge = 0; patchS({ log: leave(), ended: true, tv: null, blank: null, tool: null }); saveMemo(); endDevices();
+    endAsk = false; lastNudge = 0; patchS({ log: leave(), ended: true, tv: null, blank: null, tool: null }); saveMemo();
+    // cut off now, the end may not count (a phone may have moved the class on): the phones are let go once the server has the end
+    if (db && guardOn() && isHub() && !synced) endLater = S.t0; else { endLater = null; endDevices(); }
   }
+  let endLater = null;
   const endConfirm = () => { const busy = !!mEnd && mEnd.state === "sent"; return '<div class="confirm end-confirm pop" role="group" aria-label="수업 끝내기"><b>수업을 끝낼까요?</b><span>끝내면 기록이 저장되고 수업 화면에 ‘수업 끝’이 보여요.</span>' +
     '<button class="btn small warm" data-act="end"' + (busy ? " disabled" : "") + ">" + (busy ? "PC에서 끝내는 중…" : "수업 종료") + '</button><button class="btn small ghost" data-act="end-no">계속 수업</button></div>'; };
   // ---------- traffic light and question notes ----------
@@ -3278,13 +3296,19 @@ button.pchip { cursor: pointer; font-family: inherit; }
     // a copy waits in localStorage until IndexedDB has it, in case the page goes away mid-write
     if (keepsHere()) {
       // acct: made on this account's PC, so it goes to the account by itself (now, or when the internet is back)
-      const rec = Object.assign({ id: "local-" + (S.t0 || now()).toString(36) }, m, recAcct() ? { acct: ownerTag } : {});
+      const id = "local-" + (S.t0 || now()).toString(36), old = LOCAL.find((x) => x.id === id);
+      // the same class ended again (an end that did not count): what the teacher wrote or changed on its record stays
+      const mine = old && old.editedAt ? { text: old.text || "", again: old.again || [], questions: old.questions || [], editedAt: old.editedAt, trashedAt: old.trashedAt || null } : {};
+      const sent = old && old.srvAt ? { srvAt: old.srvAt, acctId: old.acctId } : {};
+      const rec = Object.assign({ id }, m, recAcct() ? { acct: ownerTag } : {}, mine, sent);
       LOCAL = [rec].concat(LOCAL.filter((x) => x.id !== rec.id));
       mergeRecs();
       runStore.set(doneKey(), rec);
       local.put("records", rec).then(() => { runStore.del(doneKey()); localOK = true; render(); }, () => { localOK = false; render(); });
       patchS({ memoId: rec.id });
-      recPush(rec);
+      // the account keeps a record as it was first written (its rules let only the notes · trash change), so the first copy there
+      // must be the class as the server finally has it: a class this window holds waits for that (recFinal), a little while at most once online
+      if (recAcct() && guardOn() && isHub() && holds() && refS) recHold.set(rec.id, Date.now()); else recPush(rec);
       return;
     }
     if (S.memoId) return;
@@ -3293,7 +3317,11 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // The record again from the class as the server finally has it (2026-11-23, docs/CLASS-CLOCK.md): a phone's lights, question notes
   // or moves that reached the server only after this PC ended (it was cut off then). The same id, so never a second record;
   // the end is where the last scene stopped. Once per class, and never over a record the teacher has already changed
+  // recHold: records whose first push to the account waits for this (id → when it started waiting). recRelease: send it as it is now
   let recFinalT0 = null;
+  const recHold = new Map(), REC_HOLD = 120000;
+  // one already in the account stays there as it is (the rules let only its notes change); this browser's copy has the rest
+  function recRelease(id) { if (!recHold.delete(id)) return; const r = LOCAL.find((x) => x.id === id); if (r && !r.srvAt) recPush(r); }
   function recFinal() {
     const s = liveS, id = "local-" + Number(s.t0).toString(36);
     if (recFinalT0 === s.t0 || S !== liveS || s.memoId !== id || !keepsHere()) return;
@@ -3301,15 +3329,20 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!rec) return;
     if (recSync[id] === "sending" || recSync[id] === "wait") { setTimeout(() => { if (S === liveS && liveS.t0 === s.t0) recFinal(); }, 3000); return; }
     recFinalT0 = s.t0;
-    if (rec.editedAt) return;
     const last = (s.log || [])[(s.log || []).length - 1], end = last && last.id === s.cur && s.enteredAt ? s.enteredAt + Math.round((Number(last.sec) || 0) * 1000) : rec.endAt;
-    const m = memoData(end), pick = (x) => JSON.stringify([x.totalSec, x.scenes, x.sig, x.questions, x.events, x.used]);
-    if (pick(m) === pick(rec)) return;
-    const next = Object.assign({}, rec, m, { id, text: rec.text || "" });
-    LOCAL = [next].concat(LOCAL.filter((x) => x.id !== id));
-    mergeRecs();
-    local.put("records", next).then(() => { localOK = true; render(); }, () => { localOK = false; render(); });
-    recPush(next);
+    // what the class itself says (times, lights, materials) comes from the server's final class; what the teacher writes or changed
+    // (memo, what to teach again, question notes, trash) stays as it is
+    const m = memoData(end), comp = { totalSec: m.totalSec, scenes: m.scenes, sig: m.sig, events: m.events, used: m.used, usedTitles: m.usedTitles, endAt: m.endAt, at: m.at };
+    if (!rec.editedAt) Object.assign(comp, { questions: m.questions, again: m.again });
+    const pick = (x) => JSON.stringify([x.totalSec, x.scenes, x.sig, x.events, x.used, x.questions, x.again]);
+    if (pick(Object.assign({}, rec, comp)) !== pick(rec)) {
+      const next = Object.assign({}, rec, comp);
+      LOCAL = [next].concat(LOCAL.filter((x) => x.id !== id));
+      mergeRecs();
+      local.put("records", next).then(() => { localOK = true; render(); }, () => { localOK = false; render(); });
+    }
+    // to the account once, as it finally is (an account copy already there stays as it is: the rules do not let it change)
+    recRelease(id);
   }
   // a change to a record (memo · what to teach again · question notes · trash): this browser's copy and the account's copy alike
   function updateMemo(id, p) {
@@ -3327,7 +3360,7 @@ button.pchip { cursor: pointer; font-family: inherit; }
       const fix = (list) => list.map((x) => x.acctId === aid ? Object.assign({}, x, p) : x);
       ACCT = fix(ACCT); ACCT_OLD = fix(ACCT_OLD); ACCT_TRASH = fix(ACCT_TRASH);
       recSend(id, () => db.doc("records/" + aid).update(p));
-    } else if (l && l.acct === ownerTag && recAcct()) recPush(LOCAL.find((x) => x.id === id));
+    } else if (l && l.acct === ownerTag && recAcct() && !recHold.has(id)) recPush(LOCAL.find((x) => x.id === id));
     mergeRecs(); render();
   }
 
@@ -3388,7 +3421,9 @@ button.pchip { cursor: pointer; font-family: inherit; }
   // records made on this account's PC that have not reached the account yet (the internet was down, or the page closed first)
   function recRetry() {
     if (!recAcct()) return;
-    LOCAL.filter((x) => x.acct === ownerTag && !x.srvAt && !x.claimedBy).forEach((x) => { if (recSync[x.id] !== "sending" && recSync[x.id] !== "wait") recPush(x); });
+    // a held record goes as it is after a while online, unless its class is running again (an end that did not count: the next end saves it)
+    recHold.forEach((at, id) => { if (synced && Date.now() - at > REC_HOLD && !(liveClass() && "local-" + Number(liveS.t0).toString(36) === id)) recRelease(id); });
+    LOCAL.filter((x) => x.acct === ownerTag && !x.srvAt && !x.claimedBy && !recHold.has(x.id)).forEach((x) => { if (recSync[x.id] !== "sending" && recSync[x.id] !== "wait") recPush(x); });
   }
   window.addEventListener("online", () => setTimeout(recRetry, 1500));
   setInterval(() => { if (recAcct() && LOCAL.some((x) => x.acct === ownerTag && !x.srvAt)) recRetry(); }, 30000);
@@ -3463,6 +3498,8 @@ button.pchip { cursor: pointer; font-family: inherit; }
     if (!e) return "";
     const st = recSync[e.id];
     if (st === "fail") return "fail";
+    // waiting for the class as the server finally has it (recHold): cut off, it says so as before; online it is on its way
+    if (recHold.has(e.id) && !e.srvAt) return synced ? "sending" : "wait";
     if (st === "wait") return "wait";
     if (st === "sending") return "sending";
     if (e.inAcct && !e.pending) return "ok";
@@ -6569,7 +6606,11 @@ button.pchip { cursor: pointer; font-family: inherit; }
         if (liveClass() && isHub() && holds() && !rehearsing) endLesson();
         render();
         const t0 = Date.now();
-        const out = () => { if (ownQ.length && Date.now() - t0 < 6000) { setTimeout(out, 150); return; } stageQuit(); mineDone().then(() => window.naviAuth.signOut()); };
+        const out = () => {
+          if ((ownQ.length || recHold.size || Object.keys(recSync).some((k) => recSync[k] === "sending")) && Date.now() - t0 < 6000) { setTimeout(out, 150); return; }
+          Array.from(recHold.keys()).forEach(recRelease);
+          stageQuit(); mineDone().then(() => window.naviAuth.signOut());
+        };
         out();
         break;
       }
@@ -7178,7 +7219,10 @@ button.pchip { cursor: pointer; font-family: inherit; }
       if (keepsHere() && isHub() && !rehearsing && holds()) {
         if (!first && liveS.started && liveS.ended && !liveS.memoId && prev.started && !prev.ended && prev.t0 === liveS.t0) { saveMemo(); endDevices(); }
         else if (role && !runOffer) saveRun();
-        if (confirmed(snap) && !snap.metadata.hasPendingWrites && !ownQ.length && liveS.started && liveS.ended && liveS.memoId) recFinal();
+        if (confirmed(snap) && !snap.metadata.hasPendingWrites && !ownQ.some((x) => x.path === sessionPath()) && liveS.started && liveS.ended && liveS.memoId) {
+          if (endLater !== null && endLater === liveS.t0) { endLater = null; endDevices(); }
+          recFinal();
+        }
       }
       offerFromAccount();
       render();

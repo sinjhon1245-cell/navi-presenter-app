@@ -79,6 +79,11 @@ function recOk(c, tol) {
   expect(Math.abs(c.err), "기록 전체 − 실제 경과").toBeLessThanOrEqual(tol || 1.5);
 }
 const sheetBtn = (page) => page.locator('.thumb-nav [data-act="sheet"]');
+// 계정에 있는 기록 하나(서버가 확인한 값, 없으면 null)
+const acctRec = (page, id) => page.evaluate(async (id) => {
+  const db = await window.claude.use("db");
+  return new Promise((res) => { const off = db.doc("records/" + id).onSnapshot((s) => { if (s.metadata.fromCache || s.metadata.hasPendingWrites) return; off(); res(s.exists ? s.data() : null); }, () => res(null)); });
+}, id);
 
 test("시계 1 · 정상 연결: PC와 휴대폰이 번갈아 넘겨도 두 화면 · 기록이 실제 시간과 같아요", async ({ browser }) => {
   const errors = [];
@@ -545,8 +550,15 @@ test("시계 16 · PC가 끊긴 채 끝냄 → 그 사이 휴대폰이 누른 �
   const r = await lastRecord(pc.page);
   const rec = recCheck(r, rs);
   row.yellowAfter = yellow(r); row.sameId = r.id === first.id;
+  // 계정 기록(teachers/{UID}/records/r-…)도 마지막 수업 그대로예요. 계정 기록은 메모 · 휴지통만 고칠 수 있어서(규칙), 처음 저장이 마지막 수업이어야 해요
+  const aid = "r-" + r.id.slice("local-".length);
+  await expect.poll(async () => { const d = await acctRec(pc.page, aid); return d ? yellow(d) : -1; }, { timeout: 30000, message: "계정 기록에도 노랑" }).toBe(1);
+  const acct = await acctRec(pc.page, aid);
+  row.acctYellow = yellow(acct); row.acctTotal = acct.totalSec;
+  await expect(pc.page.locator(".memo-sheet")).not.toContainText("계정에 저장하지 못했어요");
   note(Object.assign({ case: "끊긴 채 끝냄 · 휴대폰 신호" }, row, rec));
   expect(row.sameId, "같은 기록을 다시 저장").toBe(true);
+  expect(acct.totalSec, "계정 기록 = 이 브라우저 기록").toBe(r.totalSec);
   recOk(rec);
   expect((await localRecords(pc.page)).length).toBe(1);
   expect(real(errors)).toEqual([]);
@@ -577,5 +589,156 @@ test("시계 17 · 끊긴 PC가 옛 장면에서 화면을 가림 → 그 사이
   await expect(held).toHaveCount(0);
   await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
   note({ case: "끊긴 PC의 화면 가림", notice: true, again: true });
+  expect(real(errors)).toEqual([]);
+});
+
+// ---------- 독립 리뷰에서 찾은 것(2026-11-23) ----------
+test("시계 18 · 수업 중에 새로 연 휴대폰(시계 30초 빠름, 아직 못 맞춤)이 넘긴 뒤 PC가 쓰면: 그 시각은 표본이 아니라 다른 휴대폰 시계가 끌려가지 않아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const b = await phoneOf(browser, errors, pc);
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(b.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(2000);
+  // 수업 중에 연 휴대폰: 첫 값은 건너뛰고, PC가 아직 아무것도 쓰지 않아 자기 시계(30초 빠름)로 넘겨요
+  const a = await phoneOf(browser, errors, pc, 30000);
+  await expect(curLabel(a.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await nextBtn(a.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  // 곧바로 PC가 신호를 눌러요: 서버의 at(휴대폰 시계)보다 뒤로 밀린 at이라 표본이 아니어야 해요
+  await pc.page.locator(".pv-bar .sig.s-yellow").click();
+  await expect(curLabel(b.page)).toHaveText(LABELS[1]);
+  await pc.page.waitForTimeout(3000);
+  const row = { phoneB: await off(b.page, t0), pc: await off(pc.page, t0) };
+  note(Object.assign({ case: "못 맞춘 휴대폰의 시각" }, row));
+  expect(Math.abs(row.phoneB), "맞춰 둔 휴대폰은 그대로").toBeLessThanOrEqual(1);
+  expect(Math.abs(row.pc), "PC는 그대로").toBeLessThanOrEqual(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 19 · 끊긴 PC가 끝내고 메모까지 씀 → 그 사이 휴대폰이 넘김: 끝내기는 반영하지 않고(수업 id · run 그대로), 다시 끝내도 교사 메모가 남고 기록은 한 건", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const ph = await phoneOf(browser, errors, pc);
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  const runBefore = (await readDoc(pc.page, "lessons/hub")).run;
+  await pc.page.waitForTimeout(1500);
+  await pc.ctx.setOffline(true);
+  await nextBtn(ph.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1]);
+  await ph.page.waitForTimeout(1500);
+  await finishLesson(pc.page);
+  await expect(pc.page.locator(".memo-sheet")).toBeVisible();
+  await pc.page.locator("#memo-text").fill("[시험] 다시 볼 것");
+  await pc.page.locator("#memo-text").press("Tab");
+  await pc.page.waitForTimeout(800);
+  await pc.ctx.setOffline(false);
+  // 수업은 휴대폰이 넘긴 곳에서 이어지고, PC는 끝내기가 반영되지 않았다고 말해요
+  await expect(curLabel(pc.page)).toHaveText(LABELS[1], { timeout: 30000 });
+  await expect(pc.page.locator(".clk-held")).toContainText("끝내기 뒤에도", { timeout: 15000 });
+  const s = await readDoc(pc.page, "sessions/s" + pc.pin, { started: true, ended: false });
+  const row = { memoIdWhileRunning: s.memoId || null, runKept: (await readDoc(pc.page, "lessons/hub")).run === runBefore };
+  // 휴대폰은 계속 넘길 수 있어요
+  await nextBtn(ph.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[2], { timeout: 20000 });
+  const rs = await endClass(pc, t0);
+  const r = await lastRecord(pc.page);
+  const rec = recCheck(r, rs);
+  const aid = "r-" + r.id.slice("local-".length);
+  await expect.poll(async () => { const d = await acctRec(pc.page, aid); return d ? d.text : null; }, { timeout: 30000, message: "계정 기록에도 교사 메모" }).toBe("[시험] 다시 볼 것");
+  row.text = r.text;
+  note(Object.assign({ case: "끊긴 채 끝냄 · 메모 · 다시 끝냄" }, row, rec));
+  expect(row.memoIdWhileRunning, "진행 중인 수업에는 기록 id가 없어요").toBe(null);
+  expect(row.runKept, "끝나지 않은 수업의 run은 그대로").toBe(true);
+  expect(r.text, "다시 끝내도 교사 메모가 남아요").toBe("[시험] 다시 볼 것");
+  recOk(rec);
+  expect((await localRecords(pc.page)).length).toBe(1);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 20 · 수업 중에 규칙을 예전 것(by를 모름)으로 되돌려도: by가 남은 세션에 PC 쓰기가 by를 지우고 들어가, 넘기기 · 기록이 그대로예요", async ({ browser }) => {
+  const RB = "demo-navi-rb", cfg = configFor(RB, true);
+  const putRules = (content) => fetch("http://" + EMU + "/emulator/v1/projects/" + RB + ":securityRules", { method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rules: { files: [{ name: "firestore.rules", content }] } }) });
+  expect((await putRules(readFileSync("firestore.rules", "utf8"))).ok).toBe(true);
+  const errors = [], who = email("clock-rb");
+  const pc = await device(browser, PC, errors, cfg);
+  await pc.page.goto("/");
+  await signIn(pc.page, who);
+  await uidAfterSignIn(pc.page);
+  await pcLinked(pc.page);
+  const url = await qrUrl(pc.page), pin = url.match(/#remote-(\d{4})/)[1];
+  const ph = await device(browser, PHONE, errors, cfg);
+  await ph.page.goto(url);
+  await expect(ph.page.getByRole("button", { name: /구글 계정으로 연결/ })).toBeVisible();
+  await signIn(ph.page, who);
+  await toFlow(pc.page);
+  const [stage] = await Promise.all([pc.page.waitForEvent("popup"), pc.page.getByRole("button", { name: "수업 시작" }).click()]);
+  const t0 = Date.now();
+  watch(stage, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  const before = await readDoc(pc.page, "sessions/s" + pin);
+  const row = { byBefore: !!(before && before.by) };
+  // 규칙을 되돌려요(운영에서 규칙만 되돌린 경우)
+  expect((await putRules(readFileSync("tests/fixtures/deployed-2026-11-15.rules", "utf8"))).ok).toBe(true);
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[2], { timeout: 20000 });
+  await nextBtn(ph.page).click();
+  await expect(curLabel(pc.page)).toHaveText(LABELS[3], { timeout: 20000 });
+  const after = await readDoc(pc.page, "sessions/s" + pin, { started: true });
+  row.byAfter = "by" in after;
+  const rs = await endClass({ page: pc.page }, t0);
+  const rec = recCheck(await lastRecord(pc.page), rs);
+  note(Object.assign({ case: "규칙 되돌림 · by가 남은 세션" }, row, rec));
+  expect(row.byBefore, "새 규칙에서는 by가 있어요").toBe(true);
+  expect(row.byAfter, "되돌린 규칙에서는 by가 지워져요").toBe(false);
+  recOk(rec);
+  expect(real(errors).filter((e) => !/permission|insufficient/i.test(e))).toEqual([]);
+});
+
+test("시계 21 · 서버는 받았는데 답만 잃은 PC 쓰기(다시 보냄): 이미 들어간 넘기기를 ‘반영하지 않았어요’라고 잘못 말하지 않아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors);
+  const ph = await phoneOf(browser, errors, pc);
+  await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(1500);
+  // 다음 한 번의 저장(commit)은 서버에 닿게 두고, PC에는 답 대신 끊김을 줘요
+  let lost = 0;
+  await pc.page.route(/documents:commit/, async (route) => {
+    if (lost) return route.continue();
+    lost++;
+    await route.fetch();
+    await route.abort("internetdisconnected");
+  });
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(5000);
+  const row = { lost, pc: await curLabel(pc.page).innerText(), notice: await pc.page.locator(".clk-held").count() };
+  note(Object.assign({ case: "답만 잃은 쓰기" }, row));
+  expect(row.lost, "답을 한 번 잃었어요").toBe(1);
+  expect(row.pc).toBe(LABELS[1]);
+  expect(row.notice, "잘못된 알림 없음").toBe(0);
+  expect(real(errors)).toEqual([]);
+});
+
+test("시계 22 · PC 시계가 앞으로 튄 바로 그때 넘김(사이트 시각 확인 전): 그 쓰기는 표본이 아니라 휴대폰 시계가 튀지 않아요", async ({ browser }) => {
+  const errors = [];
+  const pc = await teacherPc(browser, errors, 0);
+  const ph = await phoneOf(browser, errors, pc);
+  const t0 = await startClass(pc, errors);
+  await expect(curLabel(ph.page)).toHaveText(LABELS[0], { timeout: 20000 });
+  await pc.page.waitForTimeout(3000);
+  await pc.page.evaluate(() => { window.__skew = 60000; });
+  await nextBtn(pc.page).click();
+  await expect(curLabel(ph.page)).toHaveText(LABELS[1], { timeout: 20000 });
+  await pc.page.waitForTimeout(3000);
+  const row = { phone: await off(ph.page, t0), pc: await off(pc.page, t0) };
+  note(Object.assign({ case: "앞으로 튄 순간의 쓰기" }, row));
+  expect(Math.abs(row.phone), "휴대폰은 그대로").toBeLessThanOrEqual(1);
+  expect(Math.abs(row.pc), "PC는 사이트 시각으로 되돌려요").toBeLessThanOrEqual(1);
   expect(real(errors)).toEqual([]);
 });
